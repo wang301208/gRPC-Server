@@ -42,7 +42,10 @@ class DeployRequest:
 
     service_name: str
     workdir: str
+    deploy_type: str = "service"
+    command: Optional[list[str]] = None
     require_gpu: bool = False
+    env: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
