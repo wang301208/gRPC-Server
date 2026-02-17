@@ -32,6 +32,7 @@ class NodeAgentServer:
             return
 
         out_queue: asyncio.Queue[dict] = asyncio.Queue()
+        active_tasks: set[asyncio.Task[None]] = set()
 
         def push_event(event: TaskEvent) -> None:
             out_queue.put_nowait({"type": "task_event", "data": event.payload, "event_type": event.event_type, "task_id": event.task_id})
@@ -48,9 +49,19 @@ class NodeAgentServer:
                 self.audit.write("incoming", msg)
                 if msg_type == "task_submit":
                     req = TaskRequest(**msg["task"])
-                    asyncio.create_task(self.task_manager.submit(req, push_event))
+                    async def _submit() -> None:
+                        await self.task_manager.submit(req, push_event)
+
+                    task = asyncio.create_task(_submit())
+                    active_tasks.add(task)
+                    task.add_done_callback(active_tasks.discard)
                 elif msg_type == "task_cancel":
-                    asyncio.create_task(self.task_manager.cancel(msg["task_id"], push_event))
+                    async def _cancel() -> None:
+                        await self.task_manager.cancel(msg["task_id"], push_event)
+
+                    task = asyncio.create_task(_cancel())
+                    active_tasks.add(task)
+                    task.add_done_callback(active_tasks.discard)
                 elif msg_type == "deploy":
                     req = DeployRequest(**msg["deploy"])
                     result = await self.deploy_manager.deploy(req)
@@ -60,7 +71,7 @@ class NodeAgentServer:
 
         consumer = asyncio.create_task(consume())
 
-        while not consumer.done() or not out_queue.empty():
+        while not consumer.done() or active_tasks or not out_queue.empty():
             try:
                 item = await asyncio.wait_for(out_queue.get(), timeout=0.5)
                 self.audit.write("outgoing", item)

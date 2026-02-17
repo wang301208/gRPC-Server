@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Callable, Optional
 
 from node_agent.models import TaskEvent, TaskRequest, TaskStatus
@@ -18,7 +19,7 @@ class ExecutorEngine:
             *request.command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            env={**request.env},
+            env={**os.environ, **request.env},
         )
         self._processes[request.task_id] = proc
         on_event(TaskEvent(task_id=request.task_id, event_type="running", payload={"pid": proc.pid}))

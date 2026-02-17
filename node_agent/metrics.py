@@ -61,7 +61,8 @@ class MetricsCollector:
                 callback(self.collect_once())
                 time.sleep(self.interval_sec)
 
-        if self._thread is None:
+        if self._thread is None or not self._thread.is_alive():
+            self._stop.clear()
             self._thread = threading.Thread(target=_run, daemon=True)
             self._thread.start()
 
@@ -70,3 +71,4 @@ class MetricsCollector:
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
+        self._thread = None
