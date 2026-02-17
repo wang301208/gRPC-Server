@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 
 from node_agent.capability import Capability
@@ -43,5 +44,27 @@ def test_cancel_task():
         assert canceled
         await run_task
         assert any(e.event_type == "canceled" for e in events)
+
+    asyncio.run(_run())
+
+
+def test_submit_task_keeps_system_env():
+    async def _run():
+        cap = Capability(4, 1024, 20, gpu_available=False)
+        manager = TaskManager(ResourceScheduler(cap))
+        events = []
+
+        req = TaskRequest(
+            task_id="t3",
+            command=[sys.executable, "-c", "import os; print('custom=' + os.getenv('CUSTOM_ENV', '')); print('has_path=' + str(bool(os.getenv('PATH'))))"],
+            task_type="inference",
+            env={"CUSTOM_ENV": "yes"},
+        )
+        status = await manager.submit(req, events.append)
+        assert status.value == "completed"
+
+        logs = [e.payload.get("line", "") for e in events if e.event_type == "log"]
+        assert any("custom=yes" in line for line in logs)
+        assert any("has_path=True" in line for line in logs)
 
     asyncio.run(_run())
