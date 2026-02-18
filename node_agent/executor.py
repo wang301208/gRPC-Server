@@ -15,12 +15,22 @@ class ExecutorEngine:
 
     async def run_task(self, request: TaskRequest, on_event: Callable[[TaskEvent], None]) -> TaskStatus:
         """执行单个任务并持续回传日志。"""
-        proc = await asyncio.create_subprocess_exec(
-            *request.command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env={**os.environ, **request.env},
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *request.command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env={**os.environ, **request.env},
+            )
+        except FileNotFoundError as exc:
+            on_event(
+                TaskEvent(
+                    task_id=request.task_id,
+                    event_type="failed",
+                    payload={"reason": f"命令不存在: {exc.filename}"},
+                )
+            )
+            return TaskStatus.FAILED
         self._processes[request.task_id] = proc
         on_event(TaskEvent(task_id=request.task_id, event_type="running", payload={"pid": proc.pid}))
 

@@ -1,5 +1,4 @@
 import asyncio
-import os
 import sys
 
 from node_agent.capability import Capability
@@ -66,5 +65,26 @@ def test_submit_task_keeps_system_env():
         logs = [e.payload.get("line", "") for e in events if e.event_type == "log"]
         assert any("custom=yes" in line for line in logs)
         assert any("has_path=True" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_submit_task_command_not_found():
+    async def _run():
+        cap = Capability(4, 1024, 20, gpu_available=False)
+        manager = TaskManager(ResourceScheduler(cap))
+        events = []
+
+        req = TaskRequest(
+            task_id="t4",
+            command=["__definitely_not_existing_command__"],
+            task_type="inference",
+        )
+        status = await manager.submit(req, events.append)
+        assert status.value == "failed"
+
+        failed_events = [e for e in events if e.event_type == "failed"]
+        assert failed_events
+        assert failed_events[0].payload["reason"].startswith("命令不存在")
 
     asyncio.run(_run())
