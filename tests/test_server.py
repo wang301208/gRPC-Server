@@ -68,3 +68,39 @@ def test_control_stream_waits_running_tasks_on_close():
         assert any(m.get("event_type") == "completed" and m.get("task_id") == "s2" for m in results)
 
     asyncio.run(_run())
+
+
+def test_control_stream_deploy_error_still_returns_deploy_event(monkeypatch):
+    async def _run():
+        server = NodeAgentServer(api_keys={"n1": "k1"})
+        session = NodeSession(node_id="n1", api_key="k1")
+
+        async def fake_deploy(_):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(server.deploy_manager, "deploy", fake_deploy)
+
+        messages = [
+            {
+                "type": "deploy",
+                "deploy": {
+                    "service_name": "web",
+                    "workdir": ".",
+                    "deploy_type": "website",
+                    "require_gpu": False,
+                    "env": {},
+                },
+            },
+            {"type": "close"},
+        ]
+
+        results = []
+        async for msg in server.control_stream(session, _incoming(messages)):
+            results.append(msg)
+
+        deploy_events = [m for m in results if m.get("type") == "deploy_event"]
+        assert deploy_events
+        assert deploy_events[0]["ok"] is False
+        assert "RuntimeError" in deploy_events[0]["message"]
+
+    asyncio.run(_run())

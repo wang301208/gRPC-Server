@@ -69,3 +69,28 @@ def test_deploy_respects_custom_command(monkeypatch):
         assert captured["env"]["IMAGE_PROFILE"] == "gpu"
 
     asyncio.run(_run())
+
+
+def test_deploy_command_not_found_returns_diagnosable_message(monkeypatch):
+    async def _run():
+        manager = DeployManager()
+
+        async def fake_create_subprocess_exec(*cmd, **kwargs):
+            raise FileNotFoundError("docker not found")
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+        req = DeployRequest(
+            service_name="web",
+            workdir=".",
+            deploy_type="website",
+            require_gpu=False,
+        )
+
+        result = await manager.deploy(req)
+        assert not result.ok
+        assert "FileNotFoundError" in result.message
+        assert "docker compose up -d web" in result.message
+        assert "命令不存在或不可用" in result.message
+
+    asyncio.run(_run())

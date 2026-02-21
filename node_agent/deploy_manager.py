@@ -40,14 +40,25 @@ class DeployManager:
         env["IMAGE_PROFILE"] = image_type
         env["DEPLOY_TARGET"] = request.deploy_type
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=request.workdir,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env=env,
-        )
-        out, _ = await proc.communicate()
-        if proc.returncode == 0:
-            return DeployResult(ok=True, message=out.decode("utf-8", errors="ignore"))
-        return DeployResult(ok=False, message=out.decode("utf-8", errors="ignore"))
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=request.workdir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+            )
+            out, _ = await proc.communicate()
+            if proc.returncode == 0:
+                return DeployResult(ok=True, message=out.decode("utf-8", errors="ignore"))
+            return DeployResult(ok=False, message=out.decode("utf-8", errors="ignore"))
+        except (FileNotFoundError, PermissionError, OSError) as exc:
+            joined_cmd = " ".join(cmd)
+            if isinstance(exc, FileNotFoundError):
+                reason = "命令不存在或不可用"
+            elif isinstance(exc, PermissionError):
+                reason = "命令无执行权限"
+            else:
+                reason = "执行命令时发生系统错误"
+            message = f"部署命令执行失败: command={joined_cmd}, error_type={type(exc).__name__}, reason={reason}, detail={exc}"
+            return DeployResult(ok=False, message=message)
