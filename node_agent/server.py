@@ -6,7 +6,7 @@ from typing import Any, AsyncIterator, Dict
 from node_agent.audit import AuditLogger
 from node_agent.auth import AuthManager
 from node_agent.capability import detect_capability
-from node_agent.deploy_manager import DeployManager
+from node_agent.deploy_manager import DeployManager, DeployResult
 from node_agent.metrics import MetricsCollector
 from node_agent.models import DeployRequest, NodeSession, TaskEvent, TaskRequest
 from node_agent.scheduler import ResourceScheduler
@@ -64,7 +64,14 @@ class NodeAgentServer:
                     task.add_done_callback(active_tasks.discard)
                 elif msg_type == "deploy":
                     req = DeployRequest(**msg["deploy"])
-                    result = await self.deploy_manager.deploy(req)
+                    try:
+                        result = await self.deploy_manager.deploy(req)
+                    except Exception as exc:
+                        message = (
+                            "部署流程发生未捕获异常: "
+                            f"error_type={type(exc).__name__}, detail={exc}"
+                        )
+                        result = DeployResult(ok=False, message=message)
                     out_queue.put_nowait({"type": "deploy_event", "ok": result.ok, "message": result.message})
                 elif msg_type == "close":
                     break
