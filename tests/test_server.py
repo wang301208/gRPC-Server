@@ -36,6 +36,7 @@ def test_control_stream_task_flow():
             results.append(msg)
 
         assert any(m.get("type") == "node_hello" for m in results)
+        assert any(m.get("protocol_version") == "v1" for m in results)
         assert any(m.get("event_type") == "completed" for m in results)
 
     asyncio.run(_run())
@@ -102,5 +103,36 @@ def test_control_stream_deploy_error_still_returns_deploy_event(monkeypatch):
         assert deploy_events
         assert deploy_events[0]["ok"] is False
         assert "RuntimeError" in deploy_events[0]["message"]
+
+    asyncio.run(_run())
+
+
+def test_control_stream_protocol_compat_missing_optional_fields():
+    async def _run():
+        server = NodeAgentServer(api_keys={"n1": "k1"})
+        session = NodeSession(node_id="n1", api_key="k1")
+
+        # 模拟旧客户端：缺失 protocol_version 和 prefer_gpu。
+        messages = [
+            {
+                "type": "task_submit",
+                "task": {
+                    "task_id": "compat-1",
+                    "command": [sys.executable, "-c", "print('compat')"],
+                    "task_type": "inference",
+                    "require_gpu": False,
+                    "env": {},
+                },
+            },
+            {"type": "close"},
+        ]
+
+        results = []
+        async for msg in server.control_stream(session, _incoming(messages)):
+            results.append(msg)
+
+        # 服务端在旧字段缺失时应回落到稳定默认值并正常完成任务。
+        assert any(m.get("type") == "node_hello" and m.get("protocol_version") == "v1" for m in results)
+        assert any(m.get("type") == "task_event" and m.get("event_type") == "completed" for m in results)
 
     asyncio.run(_run())

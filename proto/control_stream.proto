@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+package node_agent.control.v1;
+
+// 协议演进策略：
+// 1) 仅允许新增字段，不修改已有字段含义和编号。
+// 2) 废弃字段通过 reserved 标记并保留至少两个小版本周期。
+// 3) 客户端与服务端通过 protocol_version 协商兼容行为。
+
+message NodeHello {
+  string protocol_version = 1;
+  map<string, string> capability = 2;
+}
+
+message TaskSubmit {
+  string protocol_version = 1;
+  string task_id = 2;
+  repeated string command = 3;
+  string task_type = 4;
+  bool require_gpu = 5;
+  bool prefer_gpu = 6;
+  map<string, string> env = 7;
+}
+
+message TaskCancel {
+  string protocol_version = 1;
+  string task_id = 2;
+}
+
+message TaskEvent {
+  string protocol_version = 1;
+  string task_id = 2;
+  string event_type = 3;
+  map<string, string> payload = 4;
+}
+
+message DeployRequest {
+  string protocol_version = 1;
+  string service_name = 2;
+  string workdir = 3;
+  string deploy_type = 4;
+  repeated string command = 5;
+  bool require_gpu = 6;
+  map<string, string> env = 7;
+}
+
+message DeployEvent {
+  string protocol_version = 1;
+  bool ok = 2;
+  string message = 3;
+}
+
+message Heartbeat {
+  string protocol_version = 1;
+  map<string, string> metrics = 2;
+}
+
+message AuthFailed {
+  string protocol_version = 1;
+  string reason = 2;
+}
+
+message Close {
+  string protocol_version = 1;
+}
+
+message ControlRequest {
+  oneof payload {
+    TaskSubmit task_submit = 1;
+    TaskCancel task_cancel = 2;
+    DeployRequest deploy_request = 3;
+    Close close = 4;
+  }
+}
+
+message ControlResponse {
+  oneof payload {
+    NodeHello node_hello = 1;
+    TaskEvent task_event = 2;
+    DeployEvent deploy_event = 3;
+    Heartbeat heartbeat = 4;
+    AuthFailed auth_failed = 5;
+  }
+}
+
+service ControlStream {
+  rpc Stream(stream ControlRequest) returns (stream ControlResponse);
+}
