@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Optional
 
@@ -64,3 +65,4 @@ class TaskRuntime:
     request: TaskRequest
     status: TaskStatus = TaskStatus.QUEUED
     process: Optional[Any] = None
+    ended_at: Optional[datetime] = None
