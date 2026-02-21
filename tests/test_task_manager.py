@@ -88,3 +88,55 @@ def test_submit_task_command_not_found():
         assert failed_events[0].payload["reason"].startswith("命令不存在")
 
     asyncio.run(_run())
+
+
+def test_submit_task_allow_resubmit_after_completed():
+    async def _run():
+        cap = Capability(4, 1024, 20, gpu_available=False)
+        manager = TaskManager(ResourceScheduler(cap))
+        events = []
+
+        first_req = TaskRequest(
+            task_id="t5",
+            command=[sys.executable, "-c", "print('first')"],
+            task_type="inference",
+        )
+        first_status = await manager.submit(first_req, events.append)
+        assert first_status.value == "completed"
+
+        second_req = TaskRequest(
+            task_id="t5",
+            command=[sys.executable, "-c", "print('second')"],
+            task_type="inference",
+        )
+        second_status = await manager.submit(second_req, events.append)
+        assert second_status.value == "completed"
+
+        logs = [e.payload.get("line", "") for e in events if e.event_type == "log"]
+        assert any("first" in line for line in logs)
+        assert any("second" in line for line in logs)
+
+    asyncio.run(_run())
+
+
+def test_submit_task_history_limit_works():
+    async def _run():
+        cap = Capability(4, 1024, 20, gpu_available=False)
+        manager = TaskManager(ResourceScheduler(cap), retain_history=True, history_limit=2)
+        events = []
+
+        for index in range(4):
+            req = TaskRequest(
+                task_id="t6",
+                command=[sys.executable, "-c", f"print('run-{index}')"],
+                task_type="inference",
+            )
+            status = await manager.submit(req, events.append)
+            assert status.value == "completed"
+
+        history = manager.task_history["t6"]
+        assert len(history) == 2
+        assert [task.request.command[-1] for task in history] == ["print('run-1')", "print('run-2')"]
+        assert manager.tasks["t6"].request.command[-1] == "print('run-3')"
+
+    asyncio.run(_run())
