@@ -40,9 +40,9 @@ def test_collect_once_when_getloadavg_raises(monkeypatch):
     snapshot = MetricsCollector.collect_once()
 
     assert isinstance(snapshot, MetricSnapshot)
-    assert snapshot.cpu_percent is None
-    assert snapshot.memory_percent == 80.0
-    assert snapshot.disk_percent == 75.0
+    assert snapshot.system_cpu_percent is None
+    assert snapshot.system_memory_percent == 80.0
+    assert snapshot.system_disk_percent == 75.0
 
 
 def test_collect_once_without_proc_meminfo(monkeypatch):
@@ -59,6 +59,6 @@ def test_collect_once_without_proc_meminfo(monkeypatch):
     snapshot = MetricsCollector.collect_once()
 
     assert isinstance(snapshot.to_dict(), dict)
-    assert snapshot.cpu_percent == 50.0
-    assert snapshot.memory_percent is None
-    assert snapshot.disk_percent == 50.0
+    assert snapshot.system_cpu_percent == 50.0
+    assert snapshot.system_memory_percent is None
+    assert snapshot.system_disk_percent == 50.0
