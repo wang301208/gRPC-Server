@@ -31,20 +31,11 @@ class NodeAgentServer:
 
     async def control_stream(self, session: NodeSession, incoming: AsyncIterator[Dict[str, Any]]) -> AsyncIterator[Dict[str, Any]]:
         """模拟 gRPC 双向流：消费客户端消息并异步产出服务端事件。"""
-        auth_context = self.auth.authenticate_with_context(session.node_id, session.api_key)
-        if auth_context is None:
-            yield {
-                "type": "auth_failed",
-                "protocol_version": DEFAULT_PROTOCOL_VERSION,
-                "error_code": "AUTH_FAILED",
-                "error_message": "节点鉴权失败",
-            }
-            return
-
         out_queue: asyncio.Queue[dict] = asyncio.Queue()
         active_tasks: set[asyncio.Task[None]] = set()
         task_context: dict[str, dict[str, Any]] = {}
         consumer: asyncio.Task[None] | None = None
+        auth_context = None
 
         def push_event(event: TaskEvent) -> None:
             context = task_context.get(event.task_id, {})
@@ -181,6 +172,16 @@ class NodeAgentServer:
                     break
 
         try:
+            auth_context = self.auth.authenticate_with_context(session.node_id, session.api_key)
+            if auth_context is None:
+                yield {
+                    "type": "auth_failed",
+                    "protocol_version": DEFAULT_PROTOCOL_VERSION,
+                    "error_code": "AUTH_FAILED",
+                    "error_message": "节点鉴权失败",
+                }
+                return
+
             # 启动时先发送节点能力。
             yield {
                 "type": "node_hello",
@@ -213,6 +214,7 @@ class NodeAgentServer:
                 except asyncio.TimeoutError:
                     continue
         finally:
+            # 无论控制流因何退出，都要停止指标采集并清理后台协程。
             self.metrics.stop()
             if consumer is not None and not consumer.done():
                 consumer.cancel()
