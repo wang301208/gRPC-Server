@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import time
+import uuid
 from typing import Any, AsyncIterator, Dict
 
 from node_agent.audit import AuditLogger
 from node_agent.auth import AuthManager
 from node_agent.capability import detect_capability
 from node_agent.deploy_manager import DeployManager, DeployResult
-from node_agent.metrics import MetricsCollector
+from node_agent.metrics import MetricsCollector, TaskMetricsCollector
 from node_agent.models import DeployRequest, NodeSession, TaskEvent, TaskRequest
 from node_agent.protocol import DEFAULT_PROTOCOL_VERSION, parse_legacy_request
 from node_agent.scheduler import ResourceScheduler
@@ -25,18 +27,38 @@ class NodeAgentServer:
         self.deploy_manager = DeployManager()
         self.audit = AuditLogger()
         self.metrics = MetricsCollector(interval_sec=1.0)
+        self.task_metrics = TaskMetricsCollector()
 
     async def control_stream(self, session: NodeSession, incoming: AsyncIterator[Dict[str, Any]]) -> AsyncIterator[Dict[str, Any]]:
         """模拟 gRPC 双向流：消费客户端消息并异步产出服务端事件。"""
         auth_context = self.auth.authenticate_with_context(session.node_id, session.api_key)
         if auth_context is None:
-            yield {"type": "auth_failed", "protocol_version": DEFAULT_PROTOCOL_VERSION}
+            yield {
+                "type": "auth_failed",
+                "protocol_version": DEFAULT_PROTOCOL_VERSION,
+                "error_code": "AUTH_FAILED",
+                "error_message": "节点鉴权失败",
+            }
             return
 
         out_queue: asyncio.Queue[dict] = asyncio.Queue()
         active_tasks: set[asyncio.Task[None]] = set()
+        task_context: dict[str, dict[str, Any]] = {}
 
         def push_event(event: TaskEvent) -> None:
+            context = task_context.get(event.task_id, {})
+            now = time.monotonic()
+            if event.event_type == "running" and context.get("running_started_at") is None:
+                context["running_started_at"] = now
+                queued_at = context.get("queued_at")
+                if queued_at is not None:
+                    self.task_metrics.observe_queue_wait(now - float(queued_at))
+            if event.event_type in {"completed", "failed", "canceled"}:
+                started_at = context.get("running_started_at")
+                if started_at is not None:
+                    self.task_metrics.observe_execution(now - float(started_at))
+                self.task_metrics.observe_terminal(event.event_type)
+
             out_queue.put_nowait(
                 {
                     "type": "task_event",
@@ -44,6 +66,8 @@ class NodeAgentServer:
                     "data": event.payload,
                     "event_type": event.event_type,
                     "task_id": event.task_id,
+                    "trace_id": context.get("trace_id"),
+                    "request_id": context.get("request_id"),
                 }
             )
 
@@ -60,19 +84,26 @@ class NodeAgentServer:
                 {
                     "type": "heartbeat",
                     "protocol_version": DEFAULT_PROTOCOL_VERSION,
-                    "metrics": m.to_dict(),
+                    "metrics": {**m.to_dict(), **self.task_metrics.snapshot().to_dict()},
                 }
             )
         )
 
         async def consume() -> None:
             async for msg in incoming:
-                self.audit.write("incoming", msg)
+                self.audit.write("incoming", msg, trace_id=msg.get("trace_id"), request_id=msg.get("request_id"))
                 envelope = parse_legacy_request(msg)
                 request_kind = envelope.which_oneof()
                 if request_kind == "task_submit":
                     submit = envelope.task_submit
                     assert submit is not None
+                    request_id = msg.get("request_id") or submit.task_id
+                    trace_id = msg.get("trace_id") or request_id or uuid.uuid4().hex
+                    task_context[submit.task_id] = {
+                        "request_id": request_id,
+                        "trace_id": trace_id,
+                        "queued_at": time.monotonic(),
+                    }
                     req = TaskRequest(
                         task_id=submit.task_id,
                         command=submit.command,
@@ -99,6 +130,9 @@ class NodeAgentServer:
                                 "event_type": "rejected",
                                 "task_id": cancel.task_id,
                                 "data": {"reason": "权限不足，拒绝取消任务"},
+                                "error_code": "AUTH_FAILED",
+                                "trace_id": msg.get("trace_id"),
+                                "request_id": msg.get("request_id"),
                             }
                         )
                         continue
@@ -119,6 +153,9 @@ class NodeAgentServer:
                                 "protocol_version": DEFAULT_PROTOCOL_VERSION,
                                 "ok": False,
                                 "message": "权限不足，拒绝部署请求",
+                                "error_code": "AUTH_FAILED",
+                                "trace_id": msg.get("trace_id"),
+                                "request_id": msg.get("request_id"),
                             }
                         )
                         continue
@@ -138,12 +175,23 @@ class NodeAgentServer:
                             f"error_type={type(exc).__name__}, detail={exc}"
                         )
                         result = DeployResult(ok=False, message=message)
+
+                    error_code = None
+                    if not result.ok:
+                        if "FileNotFoundError" in result.message:
+                            error_code = "DEPLOY_CMD_NOT_FOUND"
+                        else:
+                            error_code = "DEPLOY_FAILED"
+
                     out_queue.put_nowait(
                         {
                             "type": "deploy_event",
                             "protocol_version": DEFAULT_PROTOCOL_VERSION,
                             "ok": result.ok,
                             "message": result.message,
+                            "error_code": error_code,
+                            "trace_id": msg.get("trace_id"),
+                            "request_id": msg.get("request_id"),
                         }
                     )
                 elif request_kind == "close":
@@ -154,7 +202,7 @@ class NodeAgentServer:
         while not consumer.done() or active_tasks or not out_queue.empty():
             try:
                 item = await asyncio.wait_for(out_queue.get(), timeout=0.5)
-                self.audit.write("outgoing", item)
+                self.audit.write("outgoing", item, trace_id=item.get("trace_id"), request_id=item.get("request_id"))
                 yield item
             except asyncio.TimeoutError:
                 continue

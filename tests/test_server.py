@@ -205,3 +205,84 @@ def test_control_stream_cancel_rejected_without_scope():
         assert "权限不足" in rejected_events[0]["data"]["reason"]
 
     asyncio.run(_run())
+
+
+def test_control_stream_task_trace_id_consistent_across_events():
+    async def _run():
+        server = NodeAgentServer(api_keys={"n1": "k1"})
+        session = NodeSession(node_id="n1", api_key="k1")
+
+        messages = [
+            {
+                "type": "task_submit",
+                "request_id": "req-trace-1",
+                "trace_id": "trace-xyz",
+                "task": {
+                    "task_id": "trace-task-1",
+                    "command": [sys.executable, "-c", "print('trace')"],
+                    "task_type": "inference",
+                    "require_gpu": False,
+                    "prefer_gpu": False,
+                    "env": {},
+                },
+            },
+            {"type": "close"},
+        ]
+
+        results = []
+        async for msg in server.control_stream(session, _incoming(messages)):
+            results.append(msg)
+
+        task_events = [m for m in results if m.get("type") == "task_event" and m.get("task_id") == "trace-task-1"]
+        assert task_events
+        assert {m.get("trace_id") for m in task_events} == {"trace-xyz"}
+        assert {m.get("request_id") for m in task_events} == {"req-trace-1"}
+
+    asyncio.run(_run())
+
+
+def test_control_stream_error_codes_for_auth_and_deploy_missing_command(monkeypatch):
+    async def _run():
+        denied_server = NodeAgentServer(api_keys={"n1": "k1"})
+        denied_session = NodeSession(node_id="n1", api_key="bad-key")
+
+        denied_results = []
+        async for msg in denied_server.control_stream(denied_session, _incoming([{"type": "close"}])):
+            denied_results.append(msg)
+
+        assert denied_results
+        assert denied_results[0]["error_code"] == "AUTH_FAILED"
+
+        deploy_server = NodeAgentServer(api_keys={"n1": "k1"})
+        deploy_session = NodeSession(node_id="n1", api_key="k1")
+
+        async def fake_deploy(_):
+            return type("R", (), {"ok": False, "message": "部署失败: error_type=FileNotFoundError"})()
+
+        monkeypatch.setattr(deploy_server.deploy_manager, "deploy", fake_deploy)
+
+        deploy_messages = [
+            {
+                "type": "deploy",
+                "request_id": "req-deploy-1",
+                "trace_id": "trace-deploy-1",
+                "deploy": {
+                    "service_name": "web",
+                    "workdir": ".",
+                    "deploy_type": "website",
+                    "require_gpu": False,
+                    "env": {},
+                },
+            },
+            {"type": "close"},
+        ]
+
+        deploy_results = []
+        async for msg in deploy_server.control_stream(deploy_session, _incoming(deploy_messages)):
+            deploy_results.append(msg)
+
+        deploy_events = [m for m in deploy_results if m.get("type") == "deploy_event"]
+        assert deploy_events
+        assert deploy_events[0]["error_code"] == "DEPLOY_CMD_NOT_FOUND"
+
+    asyncio.run(_run())

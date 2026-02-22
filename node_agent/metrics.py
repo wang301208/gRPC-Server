@@ -24,9 +24,9 @@ class MetricSnapshot:
     - disk_percent: 根分区磁盘使用率（0~100），不可用时为 None。
     """
 
-    cpu_percent: Optional[float]
-    memory_percent: Optional[float]
-    disk_percent: Optional[float]
+    system_cpu_percent: Optional[float]
+    system_memory_percent: Optional[float]
+    system_disk_percent: Optional[float]
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -52,7 +52,11 @@ class MetricsCollector:
             cpu_percent = float(_PSUTIL.cpu_percent(interval=None))
             memory_percent = float(_PSUTIL.virtual_memory().percent)
             disk_percent = float(_PSUTIL.disk_usage("/").percent)
-            return MetricSnapshot(cpu_percent=cpu_percent, memory_percent=memory_percent, disk_percent=disk_percent)
+            return MetricSnapshot(
+                system_cpu_percent=cpu_percent,
+                system_memory_percent=memory_percent,
+                system_disk_percent=disk_percent,
+            )
 
         # 回退到当前逻辑，并对各采集点做异常保护。
         try:
@@ -86,7 +90,11 @@ class MetricsCollector:
         except OSError:
             disk_percent = None
 
-        return MetricSnapshot(cpu_percent=cpu_percent, memory_percent=memory_percent, disk_percent=disk_percent)
+        return MetricSnapshot(
+            system_cpu_percent=cpu_percent,
+            system_memory_percent=memory_percent,
+            system_disk_percent=disk_percent,
+        )
 
     def start(self, callback: Callable[[MetricSnapshot], None]) -> None:
         """启动后台线程并回调输出。"""
@@ -107,3 +115,57 @@ class MetricsCollector:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
         self._thread = None
+
+
+@dataclass(slots=True)
+class TaskMetricSnapshot:
+    """任务维度指标快照。"""
+
+    task_queue_wait_seconds: float
+    task_execution_seconds: float
+    task_failure_rate: float
+    task_cancel_rate: float
+    task_total_count: int
+    task_failed_count: int
+    task_canceled_count: int
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+class TaskMetricsCollector:
+    """任务指标聚合器。"""
+
+    def __init__(self) -> None:
+        self.total_count = 0
+        self.failed_count = 0
+        self.canceled_count = 0
+        self.total_queue_wait_seconds = 0.0
+        self.total_execution_seconds = 0.0
+
+    def observe_queue_wait(self, wait_seconds: float) -> None:
+        # 保护指标值，避免异常时间戳导致负数污染。
+        self.total_queue_wait_seconds += max(0.0, wait_seconds)
+
+    def observe_execution(self, execution_seconds: float) -> None:
+        # 保护指标值，避免异常时间戳导致负数污染。
+        self.total_execution_seconds += max(0.0, execution_seconds)
+
+    def observe_terminal(self, event_type: str) -> None:
+        self.total_count += 1
+        if event_type == "failed":
+            self.failed_count += 1
+        if event_type == "canceled":
+            self.canceled_count += 1
+
+    def snapshot(self) -> TaskMetricSnapshot:
+        base = self.total_count if self.total_count > 0 else 1
+        return TaskMetricSnapshot(
+            task_queue_wait_seconds=self.total_queue_wait_seconds,
+            task_execution_seconds=self.total_execution_seconds,
+            task_failure_rate=self.failed_count / base,
+            task_cancel_rate=self.canceled_count / base,
+            task_total_count=self.total_count,
+            task_failed_count=self.failed_count,
+            task_canceled_count=self.canceled_count,
+        )
