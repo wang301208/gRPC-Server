@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
-from node_agent.executor import ExecutorEngine
+from node_agent.executor import DockerExecutor, Executor, SubprocessExecutor
 from node_agent.models import TaskEvent, TaskRequest, TaskRuntime, TaskStatus
 from node_agent.scheduler import ResourceScheduler
 
@@ -17,15 +17,29 @@ class TaskManager:
     def __init__(
         self,
         scheduler: ResourceScheduler,
-        executor: Optional[ExecutorEngine] = None,
+        executor: Optional[Executor] = None,
+        executors: Optional[Dict[str, Executor]] = None,
+        backend_by_task_type: Optional[Dict[str, str]] = None,
+        default_backend: str = "subprocess",
         max_concurrency: int = 2,
         retain_history: bool = False,
         history_limit: Optional[int] = None,
     ):
         self.scheduler = scheduler
-        self.executor = executor or ExecutorEngine()
+        base_executors: Dict[str, Executor] = {
+            "subprocess": executor or SubprocessExecutor(),
+            "docker": DockerExecutor(),
+        }
+        if executors:
+            base_executors.update(executors)
+
+        self.executors = base_executors
+        self.backend_by_task_type = backend_by_task_type or {}
+        self.default_backend = default_backend
+
         self.tasks: Dict[str, TaskRuntime] = {}
         self.task_history: Dict[str, list[TaskRuntime]] = {}
+        self.task_backends: Dict[str, str] = {}
         self.retain_history = retain_history
         self.history_limit = history_limit
         self._semaphore = asyncio.Semaphore(max_concurrency)
@@ -42,6 +56,25 @@ class TaskManager:
         if self.history_limit is not None and self.history_limit >= 0:
             self.task_history[runtime.request.task_id] = history[-self.history_limit :]
 
+    def _select_backend(self, request: TaskRequest) -> tuple[str, Executor]:
+        backend_name = request.env.get("TASK_BACKEND") or self.backend_by_task_type.get(request.task_type, self.default_backend)
+        executor = self.executors.get(backend_name)
+        if executor is None:
+            backend_name = self.default_backend
+            executor = self.executors[backend_name]
+        return backend_name, executor
+
+    @staticmethod
+    def _emit_with_backend(on_event, backend: str):
+        """包装事件回调，统一写入 backend 字段。"""
+
+        def _wrapped(event: TaskEvent) -> None:
+            payload = dict(event.payload)
+            payload.setdefault("backend", backend)
+            on_event(TaskEvent(task_id=event.task_id, event_type=event.event_type, payload=payload))
+
+        return _wrapped
+
     async def submit(self, request: TaskRequest, on_event) -> TaskStatus:
         """提交并执行任务。"""
         existing_runtime = self.tasks.get(request.task_id)
@@ -57,13 +90,17 @@ class TaskManager:
             on_event(TaskEvent(task_id=request.task_id, event_type="rejected", payload={"reason": decision.reason}))
             return TaskStatus.FAILED
 
+        backend_name, executor = self._select_backend(request)
+        self.task_backends[request.task_id] = backend_name
+        emit = self._emit_with_backend(on_event, backend_name)
+
         runtime = TaskRuntime(request=request)
         self.tasks[request.task_id] = runtime
-        on_event(TaskEvent(task_id=request.task_id, event_type="queued", payload={"device": decision.device}))
+        emit(TaskEvent(task_id=request.task_id, event_type="queued", payload={"device": decision.device}))
 
         async with self._semaphore:
             runtime.status = TaskStatus.RUNNING
-            result = await self.executor.run_task(request, on_event)
+            result = await executor.run(request, emit)
             runtime.status = result
             runtime.ended_at = datetime.now(timezone.utc)
             return result
@@ -75,11 +112,15 @@ class TaskManager:
             on_event(TaskEvent(task_id=task_id, event_type="cancel_failed", payload={"reason": "任务不存在"}))
             return False
 
-        canceled = await self.executor.cancel(task_id)
+        backend_name = self.task_backends.get(task_id, self.default_backend)
+        executor = self.executors.get(backend_name, self.executors[self.default_backend])
+        emit = self._emit_with_backend(on_event, backend_name)
+
+        canceled = await executor.cancel(task_id)
         if canceled:
             runtime.status = TaskStatus.CANCELED
-            on_event(TaskEvent(task_id=task_id, event_type="canceled", payload={}))
+            emit(TaskEvent(task_id=task_id, event_type="canceled", payload={}))
             return True
 
-        on_event(TaskEvent(task_id=task_id, event_type="cancel_failed", payload={"reason": "任务未在运行"}))
+        emit(TaskEvent(task_id=task_id, event_type="cancel_failed", payload={"reason": "任务未在运行"}))
         return False
