@@ -136,3 +136,72 @@ def test_control_stream_protocol_compat_missing_optional_fields():
         assert any(m.get("type") == "task_event" and m.get("event_type") == "completed" for m in results)
 
     asyncio.run(_run())
+
+
+def test_control_stream_deploy_rejected_without_scope():
+    async def _run():
+        server = NodeAgentServer(
+            api_keys={
+                "n1": {
+                    "key": "k1",
+                    "scopes": ["task.submit"],
+                    "role": "operator",
+                }
+            }
+        )
+        session = NodeSession(node_id="n1", api_key="k1")
+
+        messages = [
+            {
+                "type": "deploy",
+                "deploy": {
+                    "service_name": "web",
+                    "workdir": ".",
+                    "deploy_type": "website",
+                    "require_gpu": False,
+                    "env": {},
+                },
+            },
+            {"type": "close"},
+        ]
+
+        results = []
+        async for msg in server.control_stream(session, _incoming(messages)):
+            results.append(msg)
+
+        deploy_events = [m for m in results if m.get("type") == "deploy_event"]
+        assert deploy_events
+        assert deploy_events[0]["ok"] is False
+        assert "权限不足" in deploy_events[0]["message"]
+
+    asyncio.run(_run())
+
+
+def test_control_stream_cancel_rejected_without_scope():
+    async def _run():
+        server = NodeAgentServer(
+            api_keys={
+                "n1": {
+                    "key": "k1",
+                    "scopes": ["task.submit"],
+                    "role": "operator",
+                }
+            }
+        )
+        session = NodeSession(node_id="n1", api_key="k1")
+
+        messages = [
+            {"type": "task_cancel", "task_id": "s1"},
+            {"type": "close"},
+        ]
+
+        results = []
+        async for msg in server.control_stream(session, _incoming(messages)):
+            results.append(msg)
+
+        rejected_events = [m for m in results if m.get("type") == "task_event" and m.get("event_type") == "rejected"]
+        assert rejected_events
+        assert rejected_events[0]["task_id"] == "s1"
+        assert "权限不足" in rejected_events[0]["data"]["reason"]
+
+    asyncio.run(_run())
