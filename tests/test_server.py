@@ -286,3 +286,56 @@ def test_control_stream_error_codes_for_auth_and_deploy_missing_command(monkeypa
         assert deploy_events[0]["error_code"] == "DEPLOY_CMD_NOT_FOUND"
 
     asyncio.run(_run())
+
+
+def test_control_stream_cleanup_when_incoming_raises(monkeypatch):
+    async def _run():
+        server = NodeAgentServer(api_keys={"n1": "k1"})
+        session = NodeSession(node_id="n1", api_key="k1")
+
+        metrics_stop_count = 0
+        cancelled_count = 0
+        submit_started = asyncio.Event()
+
+        def fake_stop():
+            nonlocal metrics_stop_count
+            metrics_stop_count += 1
+
+        monkeypatch.setattr(server.metrics, "stop", fake_stop)
+
+        async def fake_submit(_, __):
+            nonlocal cancelled_count
+            submit_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled_count += 1
+                raise
+
+        monkeypatch.setattr(server.task_manager, "submit", fake_submit)
+
+        async def broken_incoming():
+            yield {
+                "type": "task_submit",
+                "task": {
+                    "task_id": "cleanup-1",
+                    "command": [sys.executable, "-c", "print('cleanup')"],
+                    "task_type": "inference",
+                    "require_gpu": False,
+                    "prefer_gpu": False,
+                    "env": {},
+                },
+            }
+            await submit_started.wait()
+            raise RuntimeError("incoming boom")
+
+        results = []
+        async for msg in server.control_stream(session, broken_incoming()):
+            results.append(msg)
+
+        # 流在异常后应当完成收尾，不遗留任务和指标线程。
+        assert any(m.get("type") == "node_hello" for m in results)
+        assert metrics_stop_count == 1
+        assert cancelled_count == 1
+
+    asyncio.run(_run())

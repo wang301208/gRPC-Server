@@ -44,6 +44,7 @@ class NodeAgentServer:
         out_queue: asyncio.Queue[dict] = asyncio.Queue()
         active_tasks: set[asyncio.Task[None]] = set()
         task_context: dict[str, dict[str, Any]] = {}
+        consumer: asyncio.Task[None] | None = None
 
         def push_event(event: TaskEvent) -> None:
             context = task_context.get(event.task_id, {})
@@ -70,24 +71,6 @@ class NodeAgentServer:
                     "request_id": context.get("request_id"),
                 }
             )
-
-        # 启动时先发送节点能力。
-        yield {
-            "type": "node_hello",
-            "protocol_version": DEFAULT_PROTOCOL_VERSION,
-            "capability": self.capability.to_dict(),
-        }
-
-        # 后台心跳指标推送。
-        self.metrics.start(
-            lambda m: out_queue.put_nowait(
-                {
-                    "type": "heartbeat",
-                    "protocol_version": DEFAULT_PROTOCOL_VERSION,
-                    "metrics": {**m.to_dict(), **self.task_metrics.snapshot().to_dict()},
-                }
-            )
-        )
 
         async def consume() -> None:
             async for msg in incoming:
@@ -197,14 +180,49 @@ class NodeAgentServer:
                 elif request_kind == "close":
                     break
 
-        consumer = asyncio.create_task(consume())
+        try:
+            # 启动时先发送节点能力。
+            yield {
+                "type": "node_hello",
+                "protocol_version": DEFAULT_PROTOCOL_VERSION,
+                "capability": self.capability.to_dict(),
+            }
 
-        while not consumer.done() or active_tasks or not out_queue.empty():
-            try:
-                item = await asyncio.wait_for(out_queue.get(), timeout=0.5)
-                self.audit.write("outgoing", item, trace_id=item.get("trace_id"), request_id=item.get("request_id"))
-                yield item
-            except asyncio.TimeoutError:
-                continue
+            # 后台心跳指标推送。
+            self.metrics.start(
+                lambda m: out_queue.put_nowait(
+                    {
+                        "type": "heartbeat",
+                        "protocol_version": DEFAULT_PROTOCOL_VERSION,
+                        "metrics": {**m.to_dict(), **self.task_metrics.snapshot().to_dict()},
+                    }
+                )
+            )
 
-        self.metrics.stop()
+            consumer = asyncio.create_task(consume())
+
+            while not consumer.done() or active_tasks or not out_queue.empty():
+                if consumer.done() and consumer.cancelled():
+                    break
+                if consumer.done() and consumer.exception() is not None:
+                    break
+                try:
+                    item = await asyncio.wait_for(out_queue.get(), timeout=0.5)
+                    self.audit.write("outgoing", item, trace_id=item.get("trace_id"), request_id=item.get("request_id"))
+                    yield item
+                except asyncio.TimeoutError:
+                    continue
+        finally:
+            self.metrics.stop()
+            if consumer is not None and not consumer.done():
+                consumer.cancel()
+                try:
+                    await consumer
+                except asyncio.CancelledError:
+                    pass
+            if active_tasks:
+                pending_tasks = [task for task in active_tasks if not task.done()]
+                for task in pending_tasks:
+                    task.cancel()
+                if pending_tasks:
+                    await asyncio.gather(*pending_tasks, return_exceptions=True)
