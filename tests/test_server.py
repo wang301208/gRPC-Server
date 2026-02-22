@@ -348,3 +348,22 @@ def test_control_stream_cleanup_when_incoming_raises(monkeypatch):
         assert cancelled_count == 1
 
     asyncio.run(_run())
+
+
+def test_health_status_ready_with_api_keys():
+    server = NodeAgentServer(api_keys={"n1": "k1"})
+
+    status = server.health_status()
+
+    assert status["alive"] is True
+    assert status["ready"] is True
+    assert all(status["checks"].values())
+
+
+def test_health_status_not_ready_without_api_keys():
+    server = NodeAgentServer(api_keys={})
+
+    status = server.health_status()
+
+    assert status["alive"] is True
+    assert status["ready"] is False
