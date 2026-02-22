@@ -28,7 +28,8 @@ class NodeAgentServer:
 
     async def control_stream(self, session: NodeSession, incoming: AsyncIterator[Dict[str, Any]]) -> AsyncIterator[Dict[str, Any]]:
         """模拟 gRPC 双向流：消费客户端消息并异步产出服务端事件。"""
-        if not self.auth.authenticate(session.node_id, session.api_key):
+        auth_context = self.auth.authenticate_with_context(session.node_id, session.api_key)
+        if auth_context is None:
             yield {"type": "auth_failed", "protocol_version": DEFAULT_PROTOCOL_VERSION}
             return
 
@@ -90,6 +91,17 @@ class NodeAgentServer:
                 elif request_kind == "task_cancel":
                     cancel = envelope.task_cancel
                     assert cancel is not None
+                    if not self.auth.authorize(auth_context, required_scope="task.cancel", allowed_roles={"admin", "operator"}):
+                        out_queue.put_nowait(
+                            {
+                                "type": "task_event",
+                                "protocol_version": DEFAULT_PROTOCOL_VERSION,
+                                "event_type": "rejected",
+                                "task_id": cancel.task_id,
+                                "data": {"reason": "权限不足，拒绝取消任务"},
+                            }
+                        )
+                        continue
 
                     async def _cancel() -> None:
                         await self.task_manager.cancel(cancel.task_id, push_event)
@@ -100,6 +112,16 @@ class NodeAgentServer:
                 elif request_kind == "deploy_request":
                     deploy = envelope.deploy_request
                     assert deploy is not None
+                    if not self.auth.authorize(auth_context, required_scope="deploy", allowed_roles={"admin", "operator"}):
+                        out_queue.put_nowait(
+                            {
+                                "type": "deploy_event",
+                                "protocol_version": DEFAULT_PROTOCOL_VERSION,
+                                "ok": False,
+                                "message": "权限不足，拒绝部署请求",
+                            }
+                        )
+                        continue
                     req = DeployRequest(
                         service_name=deploy.service_name,
                         workdir=deploy.workdir,
