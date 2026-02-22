@@ -25,6 +25,15 @@ class TaskRequest:
     task_type: str
     require_gpu: bool = False
     prefer_gpu: bool = False
+    priority: int = 0
+    timeout_sec: float = 0
+    resource_request: Dict[str, int] = field(
+        default_factory=lambda: {
+            "cpu_cores": 1,
+            "memory_mb": 256,
+            "gpu_vram_mb": 0,
+        }
+    )
     env: Dict[str, str] = field(default_factory=dict)
 
 
