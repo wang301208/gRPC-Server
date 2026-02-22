@@ -26,6 +26,35 @@ class NodeAgentServer:
         self.metrics = MetricsCollector(interval_sec=1.0)
         self.task_metrics = TaskMetricsCollector()
 
+    def health_status(self) -> Dict[str, Any]:
+        """返回服务健康状态，用于 liveness/readiness 探活。
+
+        说明：
+        - alive 代表进程内核心组件已初始化。
+        - ready 代表服务具备接收请求能力（当前至少存在可用的鉴权配置）。
+        """
+
+        checks = {
+            "capability_loaded": self.capability is not None,
+            "auth_manager_ready": self.auth is not None,
+            "scheduler_ready": self.scheduler is not None,
+            "task_manager_ready": self.task_manager is not None,
+            "deploy_manager_ready": self.deploy_manager is not None,
+            "audit_ready": self.audit is not None,
+            "metrics_ready": self.metrics is not None,
+        }
+        alive = all(checks.values())
+
+        # ready 需要满足基础活性，同时至少配置了一个节点密钥。
+        has_api_key = bool(getattr(self.auth, "api_keys", {}))
+        ready = alive and has_api_key
+
+        return {
+            "alive": alive,
+            "ready": ready,
+            "checks": checks,
+        }
+
     async def control_stream(self, session: NodeSession, incoming: AsyncIterator[Dict[str, Any]]) -> AsyncIterator[Dict[str, Any]]:
         """模拟 gRPC 双向流：将消息处理交给独立控制流引擎。"""
         components = ServerComponents(
