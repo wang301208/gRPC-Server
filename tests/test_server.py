@@ -75,6 +75,13 @@ def test_control_stream_deploy_error_still_returns_deploy_event(monkeypatch):
     async def _run():
         server = NodeAgentServer(api_keys={"n1": "k1"})
         session = NodeSession(node_id="n1", api_key="k1")
+        metrics_stop_count = 0
+
+        def fake_stop():
+            nonlocal metrics_stop_count
+            metrics_stop_count += 1
+
+        monkeypatch.setattr(server.metrics, "stop", fake_stop)
 
         async def fake_deploy(_):
             raise RuntimeError("boom")
@@ -103,6 +110,8 @@ def test_control_stream_deploy_error_still_returns_deploy_event(monkeypatch):
         assert deploy_events
         assert deploy_events[0]["ok"] is False
         assert "RuntimeError" in deploy_events[0]["message"]
+        # deploy 抛异常后流正常结束，指标线程应被回收。
+        assert metrics_stop_count == 1
 
     asyncio.run(_run())
 
