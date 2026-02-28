@@ -23,6 +23,15 @@ class _QueuedTask:
     deadline: Optional[float] = field(compare=False, default=None)
 
 
+@dataclass(slots=True)
+class _RunningMeta:
+    """运行中任务的元数据。"""
+
+    queued: _QueuedTask
+    resources: ResourceRequest
+    device: str
+
+
 class TaskManager:
     """任务管理器，负责接收任务、调度、执行、取消。"""
 
@@ -50,6 +59,8 @@ class TaskManager:
         self._queue_seq = 0
         self._cond = asyncio.Condition()
         self._dispatcher_task: Optional[asyncio.Task[None]] = None
+        self._running_tasks: set[asyncio.Task[TaskStatus]] = set()
+        self._running_meta: dict[asyncio.Task[TaskStatus], _RunningMeta] = {}
 
     def _is_terminal(self, status: TaskStatus) -> bool:
         return status in self.TERMINAL_STATUSES
@@ -77,18 +88,71 @@ class TaskManager:
 
     async def _dispatch_loop(self) -> None:
         while True:
+            started_any = False
             async with self._cond:
-                scheduled = await self._pick_schedulable_task()
-                if not scheduled:
-                    if not self._pending:
-                        return
-                    await self._cond.wait()
+                while True:
+                    scheduled = await self._pick_schedulable_task()
+                    if not scheduled:
+                        break
+
+                    queued, resources, device = scheduled
+                    self._running_count += 1
+                    self._usage.used_cpu_cores += resources.cpu_cores
+                    self._usage.used_memory_mb += resources.memory_mb
+                    if device == "gpu":
+                        self._usage.used_gpu_vram_mb += max(
+                            self.scheduler.gpu_vram_threshold_mb,
+                            resources.gpu_vram_mb,
+                        )
+
+                    running_task = asyncio.create_task(self._run_one(queued, resources, device))
+                    self._running_tasks.add(running_task)
+                    self._running_meta[running_task] = _RunningMeta(queued=queued, resources=resources, device=device)
+                    running_task.add_done_callback(self._on_running_task_done)
+                    started_any = True
+
+                if started_any:
                     continue
 
-            queued, resources, device = scheduled
-            result = await self._run_one(queued, resources, device)
-            if not queued.result_future.done():
-                queued.result_future.set_result(result)
+                if not self._pending and not self._running_tasks:
+                    return
+
+                await self._cond.wait()
+
+    def _on_running_task_done(self, task: asyncio.Task[TaskStatus]) -> None:
+        asyncio.create_task(self._finalize_running_task(task))
+
+    async def _finalize_running_task(self, task: asyncio.Task[TaskStatus]) -> None:
+        meta = self._running_meta.pop(task, None)
+        self._running_tasks.discard(task)
+        if not meta:
+            return
+
+        queued, resources, device = meta.queued, meta.resources, meta.device
+        try:
+            result = task.result()
+        except Exception:
+            queued.runtime.status = TaskStatus.FAILED
+            queued.runtime.ended_at = datetime.now(timezone.utc)
+            queued.on_event(
+                TaskEvent(task_id=queued.request.task_id, event_type="failed", payload={"reason": "任务执行异常"})
+            )
+            result = TaskStatus.FAILED
+
+        if not queued.result_future.done():
+            queued.result_future.set_result(result)
+
+        self._running_count = max(0, self._running_count - 1)
+        self._usage.used_cpu_cores = max(0, self._usage.used_cpu_cores - resources.cpu_cores)
+        self._usage.used_memory_mb = max(0, self._usage.used_memory_mb - resources.memory_mb)
+        if device == "gpu":
+            self._usage.used_gpu_vram_mb = max(
+                0,
+                self._usage.used_gpu_vram_mb - max(self.scheduler.gpu_vram_threshold_mb, resources.gpu_vram_mb),
+            )
+
+        async with self._cond:
+            self._cond.notify_all()
 
     async def _pick_schedulable_task(self) -> tuple[_QueuedTask, ResourceRequest, str] | None:
         now = asyncio.get_running_loop().time()
@@ -139,12 +203,6 @@ class TaskManager:
         return None
 
     async def _run_one(self, queued: _QueuedTask, resources: ResourceRequest, device: str) -> TaskStatus:
-        self._running_count += 1
-        self._usage.used_cpu_cores += resources.cpu_cores
-        self._usage.used_memory_mb += resources.memory_mb
-        if device == "gpu":
-            self._usage.used_gpu_vram_mb += max(self.scheduler.gpu_vram_threshold_mb, resources.gpu_vram_mb)
-
         queued.runtime.status = TaskStatus.RUNNING
         queued.on_event(TaskEvent(task_id=queued.request.task_id, event_type="running", payload={"device": device}))
 
@@ -167,17 +225,6 @@ class TaskManager:
             return TaskStatus.FAILED
         finally:
             queued.runtime.ended_at = datetime.now(timezone.utc)
-            self._running_count = max(0, self._running_count - 1)
-            self._usage.used_cpu_cores = max(0, self._usage.used_cpu_cores - resources.cpu_cores)
-            self._usage.used_memory_mb = max(0, self._usage.used_memory_mb - resources.memory_mb)
-            if device == "gpu":
-                self._usage.used_gpu_vram_mb = max(
-                    0,
-                    self._usage.used_gpu_vram_mb - max(self.scheduler.gpu_vram_threshold_mb, resources.gpu_vram_mb),
-                )
-
-            async with self._cond:
-                self._cond.notify_all()
 
     async def submit(self, request: TaskRequest, on_event) -> TaskStatus:
         """提交任务到优先队列，等待调度结果。"""
