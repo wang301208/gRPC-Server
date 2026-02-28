@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from typing import Callable, Optional
 
@@ -12,6 +13,33 @@ class SubprocessExecutor:
 
     def __init__(self) -> None:
         self._processes: dict[str, asyncio.subprocess.Process] = {}
+
+    def _parse_structured_event(self, task_id: str, line_text: str) -> TaskEvent:
+        """解析约定前缀的结构化事件，不符合格式时回退为普通日志事件。"""
+        stripped_line = line_text.rstrip()
+        prefix_to_event = {
+            "__PROGRESS__": "progress",
+            "__ARTIFACT__": "artifact",
+        }
+
+        for prefix, event_type in prefix_to_event.items():
+            if not stripped_line.startswith(prefix):
+                continue
+
+            payload_text = stripped_line[len(prefix) :].strip()
+            if not payload_text:
+                break
+
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                break
+
+            if isinstance(payload, dict):
+                return TaskEvent(task_id=task_id, event_type=event_type, payload=payload)
+            break
+
+        return TaskEvent(task_id=task_id, event_type="log", payload={"line": stripped_line})
 
     async def run_task(self, request: TaskRequest, on_event: Callable[[TaskEvent], None]) -> TaskStatus:
         """执行任务并持续回传日志。"""
@@ -47,13 +75,8 @@ class SubprocessExecutor:
             line = await proc.stdout.readline()
             if not line:
                 break
-            on_event(
-                TaskEvent(
-                    task_id=request.task_id,
-                    event_type="log",
-                    payload={"line": line.decode("utf-8", errors="ignore").rstrip()},
-                )
-            )
+            line_text = line.decode("utf-8", errors="ignore")
+            on_event(self._parse_structured_event(request.task_id, line_text))
 
         code = await proc.wait()
         self._processes.pop(request.task_id, None)
