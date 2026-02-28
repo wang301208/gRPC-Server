@@ -225,3 +225,34 @@ def test_gpu_insufficient_queue_then_timeout_fail():
         assert (await run_b).value == "completed"
 
     asyncio.run(_run())
+
+
+def test_two_sleep_tasks_run_in_parallel():
+    async def _run():
+        cap = Capability(4, 1024, 20, gpu_available=False)
+        manager = TaskManager(ResourceScheduler(cap), max_concurrency=2)
+        events = []
+
+        req_a = TaskRequest(
+            task_id="parallel-a",
+            command=[sys.executable, "-c", "import time; time.sleep(0.6); print('a')"],
+            task_type="inference",
+        )
+        req_b = TaskRequest(
+            task_id="parallel-b",
+            command=[sys.executable, "-c", "import time; time.sleep(0.6); print('b')"],
+            task_type="inference",
+        )
+
+        start = asyncio.get_running_loop().time()
+        result_a, result_b = await asyncio.gather(
+            manager.submit(req_a, events.append),
+            manager.submit(req_b, events.append),
+        )
+        elapsed = asyncio.get_running_loop().time() - start
+
+        assert result_a.value == "completed"
+        assert result_b.value == "completed"
+        assert elapsed < 1.0
+
+    asyncio.run(_run())
