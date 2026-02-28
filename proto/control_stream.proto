@@ -39,7 +39,15 @@ message TaskCancel {
 message TaskEvent {
   string protocol_version = 1;
   string task_id = 2;
+  // event_type 语义约定：
+  // - queued/running/completed/failed/canceled/rejected/cancel_failed：生命周期事件。
+  // - log：任务标准输出/标准错误日志，payload 需包含 line。
+  // - progress：任务进度事件，建议由日志前缀 "__PROGRESS__ {json}" 触发，
+  //   payload 至少包含可观测字段（如 percent、step）。
+  // - artifact：任务产物事件，建议由日志前缀 "__ARTIFACT__ {json}" 触发，
+  //   payload 约定包含 name、path，可选 size（字节）。
   string event_type = 3;
+  // payload 为事件附加数据，不同 event_type 的字段约束见 event_type 注释。
   map<string, string> payload = 4;
 }
 

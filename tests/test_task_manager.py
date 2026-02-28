@@ -305,3 +305,40 @@ def test_multi_gpu_tasks_record_and_release_gpu_indices():
         assert manager._usage.used_gpu_vram_by_index == {}
 
     asyncio.run(_run())
+
+
+def test_submit_task_parse_progress_and_artifact_events():
+    async def _run():
+        cap = Capability(4, 1024, 20, gpu_available=False)
+        manager = TaskManager(ResourceScheduler(cap))
+        events = []
+
+        req = TaskRequest(
+            task_id="t-structured-events",
+            command=[
+                sys.executable,
+                "-c",
+                (
+                    "print('__PROGRESS__ {\"percent\":42,\"step\":\"epoch3\"}');"
+                    "print('__ARTIFACT__ {\"name\":\"model\",\"path\":\"./model.bin\",\"size\":1024}');"
+                    "print('plain-log')"
+                ),
+            ],
+            task_type="train",
+        )
+
+        status = await manager.submit(req, events.append)
+        assert status.value == "completed"
+
+        progress_events = [event for event in events if event.event_type == "progress"]
+        assert len(progress_events) == 1
+        assert progress_events[0].payload == {"percent": 42, "step": "epoch3"}
+
+        artifact_events = [event for event in events if event.event_type == "artifact"]
+        assert len(artifact_events) == 1
+        assert artifact_events[0].payload == {"name": "model", "path": "./model.bin", "size": 1024}
+
+        log_lines = [event.payload.get("line") for event in events if event.event_type == "log"]
+        assert "plain-log" in log_lines
+
+    asyncio.run(_run())
