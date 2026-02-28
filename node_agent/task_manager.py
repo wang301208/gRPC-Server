@@ -8,7 +8,7 @@ from typing import Callable, Dict, Optional
 
 from node_agent.executor import ExecutorEngine
 from node_agent.models import TaskEvent, TaskRequest, TaskRuntime, TaskStatus
-from node_agent.scheduler import ResourceRequest, ResourceScheduler, ResourceUsage, ScheduleInput
+from node_agent.scheduler import ResourceRequest, ResourceScheduler, ResourceUsage, ScheduleDecision, ScheduleInput
 
 
 @dataclass(order=True, slots=True)
@@ -29,7 +29,7 @@ class _RunningMeta:
 
     queued: _QueuedTask
     resources: ResourceRequest
-    device: str
+    decision: ScheduleDecision
 
 
 class TaskManager:
@@ -86,6 +86,34 @@ class TaskManager:
             gpu_vram_mb=max(0, int(request.resource_request.get("gpu_vram_mb", 0))),
         )
 
+    def _gpu_allocation_mb(self, resources: ResourceRequest) -> int:
+        """计算每个 GPU 任务需要锁定的显存。"""
+        return max(self.scheduler.gpu_vram_threshold_mb, resources.gpu_vram_mb)
+
+    def _apply_usage(self, resources: ResourceRequest, decision: ScheduleDecision) -> None:
+        """记录任务资源占用。"""
+        self._usage.used_cpu_cores += resources.cpu_cores
+        self._usage.used_memory_mb += resources.memory_mb
+        if decision.device == "gpu" and decision.gpu_indices:
+            allocated = self._gpu_allocation_mb(resources)
+            for gpu_index in decision.gpu_indices:
+                current = self._usage.used_gpu_vram_by_index.get(gpu_index, 0)
+                self._usage.used_gpu_vram_by_index[gpu_index] = current + allocated
+
+    def _release_usage(self, resources: ResourceRequest, decision: ScheduleDecision) -> None:
+        """释放任务资源占用。"""
+        self._usage.used_cpu_cores = max(0, self._usage.used_cpu_cores - resources.cpu_cores)
+        self._usage.used_memory_mb = max(0, self._usage.used_memory_mb - resources.memory_mb)
+        if decision.device == "gpu" and decision.gpu_indices:
+            allocated = self._gpu_allocation_mb(resources)
+            for gpu_index in decision.gpu_indices:
+                current = self._usage.used_gpu_vram_by_index.get(gpu_index, 0)
+                remaining = max(0, current - allocated)
+                if remaining == 0:
+                    self._usage.used_gpu_vram_by_index.pop(gpu_index, None)
+                else:
+                    self._usage.used_gpu_vram_by_index[gpu_index] = remaining
+
     async def _dispatch_loop(self) -> None:
         while True:
             started_any = False
@@ -95,19 +123,13 @@ class TaskManager:
                     if not scheduled:
                         break
 
-                    queued, resources, device = scheduled
+                    queued, resources, decision = scheduled
                     self._running_count += 1
-                    self._usage.used_cpu_cores += resources.cpu_cores
-                    self._usage.used_memory_mb += resources.memory_mb
-                    if device == "gpu":
-                        self._usage.used_gpu_vram_mb += max(
-                            self.scheduler.gpu_vram_threshold_mb,
-                            resources.gpu_vram_mb,
-                        )
+                    self._apply_usage(resources, decision)
 
-                    running_task = asyncio.create_task(self._run_one(queued, resources, device))
+                    running_task = asyncio.create_task(self._run_one(queued, resources, decision))
                     self._running_tasks.add(running_task)
-                    self._running_meta[running_task] = _RunningMeta(queued=queued, resources=resources, device=device)
+                    self._running_meta[running_task] = _RunningMeta(queued=queued, resources=resources, decision=decision)
                     running_task.add_done_callback(self._on_running_task_done)
                     started_any = True
 
@@ -128,7 +150,7 @@ class TaskManager:
         if not meta:
             return
 
-        queued, resources, device = meta.queued, meta.resources, meta.device
+        queued, resources, decision = meta.queued, meta.resources, meta.decision
         try:
             result = task.result()
         except Exception:
@@ -143,18 +165,12 @@ class TaskManager:
             queued.result_future.set_result(result)
 
         self._running_count = max(0, self._running_count - 1)
-        self._usage.used_cpu_cores = max(0, self._usage.used_cpu_cores - resources.cpu_cores)
-        self._usage.used_memory_mb = max(0, self._usage.used_memory_mb - resources.memory_mb)
-        if device == "gpu":
-            self._usage.used_gpu_vram_mb = max(
-                0,
-                self._usage.used_gpu_vram_mb - max(self.scheduler.gpu_vram_threshold_mb, resources.gpu_vram_mb),
-            )
+        self._release_usage(resources, decision)
 
         async with self._cond:
             self._cond.notify_all()
 
-    async def _pick_schedulable_task(self) -> tuple[_QueuedTask, ResourceRequest, str] | None:
+    async def _pick_schedulable_task(self) -> tuple[_QueuedTask, ResourceRequest, ScheduleDecision] | None:
         now = asyncio.get_running_loop().time()
 
         # 先处理超时，避免无法调度的任务无限等待。
@@ -172,9 +188,7 @@ class TaskManager:
                 heapq._siftdown(self._pending, 0, index)
             item.runtime.status = TaskStatus.FAILED
             item.runtime.ended_at = datetime.now(timezone.utc)
-            item.on_event(
-                TaskEvent(task_id=item.request.task_id, event_type="failed", payload={"reason": "任务等待超时"})
-            )
+            item.on_event(TaskEvent(task_id=item.request.task_id, event_type="failed", payload={"reason": "任务等待超时"}))
             if not item.result_future.done():
                 item.result_future.set_result(TaskStatus.FAILED)
 
@@ -198,13 +212,19 @@ class TaskManager:
 
             self._pending.remove(candidate)
             heapq.heapify(self._pending)
-            return candidate, request_resources, decision.device
+            return candidate, request_resources, decision
 
         return None
 
-    async def _run_one(self, queued: _QueuedTask, resources: ResourceRequest, device: str) -> TaskStatus:
+    async def _run_one(self, queued: _QueuedTask, resources: ResourceRequest, decision: ScheduleDecision) -> TaskStatus:
         queued.runtime.status = TaskStatus.RUNNING
-        queued.on_event(TaskEvent(task_id=queued.request.task_id, event_type="running", payload={"device": device}))
+        queued.on_event(
+            TaskEvent(
+                task_id=queued.request.task_id,
+                event_type="running",
+                payload={"device": decision.device, "gpu_indices": decision.gpu_indices},
+            )
+        )
 
         try:
             if queued.request.timeout_sec and queued.request.timeout_sec > 0:
@@ -219,9 +239,7 @@ class TaskManager:
         except asyncio.TimeoutError:
             await self.executor.cancel(queued.request.task_id)
             queued.runtime.status = TaskStatus.FAILED
-            queued.on_event(
-                TaskEvent(task_id=queued.request.task_id, event_type="failed", payload={"reason": "任务执行超时"})
-            )
+            queued.on_event(TaskEvent(task_id=queued.request.task_id, event_type="failed", payload={"reason": "任务执行超时"}))
             return TaskStatus.FAILED
         finally:
             queued.runtime.ended_at = datetime.now(timezone.utc)
