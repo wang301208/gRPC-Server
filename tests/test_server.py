@@ -121,7 +121,7 @@ def test_control_stream_protocol_compat_missing_optional_fields():
         server = NodeAgentServer(api_keys={"n1": "k1"})
         session = NodeSession(node_id="n1", api_key="k1")
 
-        # 模拟旧客户端：缺失 protocol_version 和 prefer_gpu。
+        # 模拟旧客户端：缺失 protocol_version、prefer_gpu 以及新增调度参数。
         messages = [
             {
                 "type": "task_submit",
@@ -142,7 +142,99 @@ def test_control_stream_protocol_compat_missing_optional_fields():
 
         # 服务端在旧字段缺失时应回落到稳定默认值并正常完成任务。
         assert any(m.get("type") == "node_hello" and m.get("protocol_version") == "v1" for m in results)
+        queued_event = next(m for m in results if m.get("type") == "task_event" and m.get("event_type") == "queued")
+        assert queued_event["data"]["priority"] == 0
+        assert queued_event["data"]["resource_request"] == {"cpu_cores": 1, "memory_mb": 256, "gpu_vram_mb": 0}
         assert any(m.get("type") == "task_event" and m.get("event_type") == "completed" for m in results)
+
+    asyncio.run(_run())
+
+
+
+def test_control_stream_new_fields_passthrough_affects_queue_and_timeout():
+    async def _run():
+        priority_server = NodeAgentServer(api_keys={"n1": "k1"})
+        priority_server.task_manager.max_concurrency = 1
+        session = NodeSession(node_id="n1", api_key="k1")
+
+        priority_messages = [
+            {
+                "type": "task_submit",
+                "task": {
+                    "task_id": "busy-1",
+                    "command": [sys.executable, "-c", "import time; time.sleep(0.6)"],
+                    "task_type": "inference",
+                    "priority": 1,
+                    "timeout_sec": 2,
+                    "resource_request": {"cpu_cores": 1, "memory_mb": 256, "gpu_vram_mb": 0},
+                },
+            },
+            {
+                "type": "task_submit",
+                "task": {
+                    "task_id": "low-priority",
+                    "command": [sys.executable, "-c", "print('low')"],
+                    "task_type": "inference",
+                    "priority": 1,
+                    "timeout_sec": 2,
+                    "resource_request": {"cpu_cores": 1, "memory_mb": 256, "gpu_vram_mb": 0},
+                },
+            },
+            {
+                "type": "task_submit",
+                "task": {
+                    "task_id": "high-priority",
+                    "command": [sys.executable, "-c", "print('high')"],
+                    "task_type": "inference",
+                    "priority": 9,
+                    "timeout_sec": 2,
+                    "resource_request": {"cpu_cores": 1, "memory_mb": 256, "gpu_vram_mb": 0},
+                },
+            },
+            {"type": "close"},
+        ]
+
+        priority_results = []
+        async for msg in priority_server.control_stream(session, _incoming(priority_messages)):
+            priority_results.append(msg)
+
+        running_events = [
+            m
+            for m in priority_results
+            if m.get("type") == "task_event" and m.get("event_type") == "running"
+        ]
+        started_after_busy = [m["task_id"] for m in running_events if m["task_id"] != "busy-1"]
+        assert started_after_busy[0] == "high-priority"
+
+        timeout_server = NodeAgentServer(api_keys={"n1": "k1"})
+        timeout_messages = [
+            {
+                "type": "task_submit",
+                "task": {
+                    "task_id": "timeout-task",
+                    "command": [sys.executable, "-c", "import time; time.sleep(0.2)"],
+                    "task_type": "inference",
+                    "priority": 0,
+                    "timeout_sec": 0.05,
+                    "resource_request": {"cpu_cores": 1, "memory_mb": 256, "gpu_vram_mb": 0},
+                },
+            },
+            {"type": "close"},
+        ]
+
+        timeout_results = []
+        async for msg in timeout_server.control_stream(session, _incoming(timeout_messages)):
+            timeout_results.append(msg)
+
+        timeout_failed = [
+            m
+            for m in timeout_results
+            if m.get("type") == "task_event"
+            and m.get("task_id") == "timeout-task"
+            and m.get("event_type") == "failed"
+        ]
+        assert timeout_failed
+        assert timeout_failed[0]["data"]["reason"] == "任务执行超时"
 
     asyncio.run(_run())
 
