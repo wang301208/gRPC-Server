@@ -35,6 +35,7 @@ class TaskRequest:
         }
     )
     env: Dict[str, str] = field(default_factory=dict)
+    workdir: str = ""
 
 
 @dataclass(slots=True)
