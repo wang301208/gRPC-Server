@@ -12,6 +12,12 @@ message NodeHello {
   map<string, string> capability = 2;
 }
 
+message TaskResourceRequest {
+  int32 cpu_cores = 1;
+  int32 memory_mb = 2;
+  int32 gpu_vram_mb = 3;
+}
+
 message TaskSubmit {
   string protocol_version = 1;
   string task_id = 2;
@@ -20,6 +26,9 @@ message TaskSubmit {
   bool require_gpu = 5;
   bool prefer_gpu = 6;
   map<string, string> env = 7;
+  int32 priority = 8;
+  double timeout_sec = 9;
+  TaskResourceRequest resource_request = 10;
 }
 
 message TaskCancel {

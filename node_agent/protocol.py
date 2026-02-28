@@ -13,6 +13,15 @@ class TaskSubmitMessage:
     task_type: str
     require_gpu: bool = False
     prefer_gpu: bool = False
+    priority: int = 0
+    timeout_sec: float = 0
+    resource_request: Dict[str, int] = field(
+        default_factory=lambda: {
+            "cpu_cores": 1,
+            "memory_mb": 256,
+            "gpu_vram_mb": 0,
+        }
+    )
     env: Dict[str, str] = field(default_factory=dict)
     protocol_version: str = DEFAULT_PROTOCOL_VERSION
 
@@ -65,6 +74,7 @@ def parse_legacy_request(message: Dict[str, Any]) -> ControlRequestEnvelope:
     msg_type = message.get("type")
     if msg_type == "task_submit":
         task = message.get("task", {})
+        resource_request = dict(task.get("resource_request") or {})
         return ControlRequestEnvelope(
             task_submit=TaskSubmitMessage(
                 task_id=task["task_id"],
@@ -72,6 +82,13 @@ def parse_legacy_request(message: Dict[str, Any]) -> ControlRequestEnvelope:
                 task_type=task["task_type"],
                 require_gpu=task.get("require_gpu", False),
                 prefer_gpu=task.get("prefer_gpu", False),
+                priority=int(task.get("priority", 0)),
+                timeout_sec=float(task.get("timeout_sec", 0)),
+                resource_request={
+                    "cpu_cores": int(resource_request.get("cpu_cores", 1)),
+                    "memory_mb": int(resource_request.get("memory_mb", 256)),
+                    "gpu_vram_mb": int(resource_request.get("gpu_vram_mb", 0)),
+                },
                 env=dict(task.get("env") or {}),
                 protocol_version=protocol_version,
             )

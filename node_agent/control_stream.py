@@ -115,6 +115,9 @@ class ControlStreamEngine:
             task_type=submit.task_type,
             require_gpu=submit.require_gpu,
             prefer_gpu=submit.prefer_gpu,
+            priority=submit.priority,
+            timeout_sec=submit.timeout_sec,
+            resource_request=submit.resource_request,
             env=submit.env,
         )
 
