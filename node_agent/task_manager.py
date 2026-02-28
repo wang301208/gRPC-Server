@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, Dict, Optional
 
-from node_agent.executor import ExecutorEngine
+from node_agent.executors import SubprocessExecutor, TaskExecutor
 from node_agent.models import TaskEvent, TaskRequest, TaskRuntime, TaskStatus
 from node_agent.scheduler import ResourceRequest, ResourceScheduler, ResourceUsage, ScheduleDecision, ScheduleInput
 
@@ -40,13 +40,13 @@ class TaskManager:
     def __init__(
         self,
         scheduler: ResourceScheduler,
-        executor: Optional[ExecutorEngine] = None,
+        executor: Optional[TaskExecutor] = None,
         max_concurrency: int = 2,
         retain_history: bool = False,
         history_limit: Optional[int] = None,
     ):
         self.scheduler = scheduler
-        self.executor = executor or ExecutorEngine()
+        self.executor = executor or SubprocessExecutor()
         self.max_concurrency = max_concurrency
         self.tasks: Dict[str, TaskRuntime] = {}
         self.task_history: Dict[str, list[TaskRuntime]] = {}

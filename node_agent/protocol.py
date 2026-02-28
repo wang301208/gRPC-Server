@@ -23,6 +23,7 @@ class TaskSubmitMessage:
         }
     )
     env: Dict[str, str] = field(default_factory=dict)
+    workdir: str = ""
     protocol_version: str = DEFAULT_PROTOCOL_VERSION
 
 
@@ -90,6 +91,7 @@ def parse_legacy_request(message: Dict[str, Any]) -> ControlRequestEnvelope:
                     "gpu_vram_mb": int(resource_request.get("gpu_vram_mb", 0)),
                 },
                 env=dict(task.get("env") or {}),
+                workdir=str(task.get("workdir") or ""),
                 protocol_version=protocol_version,
             )
         )

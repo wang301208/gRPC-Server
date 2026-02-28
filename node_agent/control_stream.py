@@ -119,6 +119,7 @@ class ControlStreamEngine:
             timeout_sec=submit.timeout_sec,
             resource_request=submit.resource_request,
             env=submit.env,
+            workdir=submit.workdir,
         )
 
         async def _submit() -> None:
