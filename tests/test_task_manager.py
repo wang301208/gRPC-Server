@@ -1,7 +1,7 @@
 import asyncio
 import sys
 
-from node_agent.capability import Capability
+from node_agent.capability import Capability, GpuDevice
 from node_agent.models import TaskRequest
 from node_agent.scheduler import ResourceScheduler
 from node_agent.task_manager import TaskManager
@@ -254,5 +254,54 @@ def test_two_sleep_tasks_run_in_parallel():
         assert result_a.value == "completed"
         assert result_b.value == "completed"
         assert elapsed < 1.0
+
+    asyncio.run(_run())
+
+
+def test_multi_gpu_tasks_record_and_release_gpu_indices():
+    async def _run():
+        cap = Capability(
+            8,
+            4096,
+            20,
+            gpu_available=True,
+            gpus=[
+                GpuDevice(index=0, name="GPU-0", total_vram_mb=4096),
+                GpuDevice(index=1, name="GPU-1", total_vram_mb=4096),
+            ],
+        )
+        manager = TaskManager(ResourceScheduler(cap, gpu_vram_threshold_mb=2048), max_concurrency=2)
+        events = []
+
+        req_a = TaskRequest(
+            task_id="multi-gpu-a",
+            command=[sys.executable, "-c", "import time; time.sleep(0.4); print('a')"],
+            task_type="train",
+            require_gpu=True,
+            resource_request={"cpu_cores": 1, "memory_mb": 128, "gpu_vram_mb": 2048},
+        )
+        req_b = TaskRequest(
+            task_id="multi-gpu-b",
+            command=[sys.executable, "-c", "import time; time.sleep(0.4); print('b')"],
+            task_type="train",
+            require_gpu=True,
+            resource_request={"cpu_cores": 1, "memory_mb": 128, "gpu_vram_mb": 2048},
+        )
+
+        status_a, status_b = await asyncio.gather(
+            manager.submit(req_a, events.append),
+            manager.submit(req_b, events.append),
+        )
+
+        assert status_a.value == "completed"
+        assert status_b.value == "completed"
+
+        running_events = [event for event in events if event.event_type == "running" and event.payload.get("device") == "gpu"]
+        assert len(running_events) == 2
+        gpu_indices = [event.payload.get("gpu_indices") for event in running_events]
+        assert sorted(gpu_indices) == [[0], [1]]
+
+        # 任务结束后，GPU 显存占用应被释放。
+        assert manager._usage.used_gpu_vram_by_index == {}
 
     asyncio.run(_run())
