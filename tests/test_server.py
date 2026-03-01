@@ -308,6 +308,57 @@ def test_control_stream_cancel_rejected_without_scope():
     asyncio.run(_run())
 
 
+def test_control_stream_submit_rejected_without_submit_scope():
+    async def _run():
+        server = NodeAgentServer(
+            api_keys={
+                "n1": {
+                    "key": "k1",
+                    "scopes": ["task.cancel"],
+                    "role": "operator",
+                }
+            }
+        )
+        session = NodeSession(node_id="n1", api_key="k1")
+
+        messages = [
+            {
+                "type": "task_submit",
+                "request_id": "req-submit-auth-1",
+                "trace_id": "trace-submit-auth-1",
+                "task": {
+                    "task_id": "submit-denied-1",
+                    "command": [sys.executable, "-c", "print('should not run')"],
+                    "task_type": "inference",
+                    "require_gpu": False,
+                    "prefer_gpu": False,
+                    "env": {},
+                },
+            },
+            {"type": "close"},
+        ]
+
+        results = []
+        async for msg in server.control_stream(session, _incoming(messages)):
+            results.append(msg)
+
+        rejected_events = [m for m in results if m.get("type") == "task_event" and m.get("event_type") == "rejected"]
+        assert rejected_events
+        assert rejected_events[0]["task_id"] == "submit-denied-1"
+        assert rejected_events[0]["error_code"] == "AUTH_FAILED"
+        assert rejected_events[0]["trace_id"] == "trace-submit-auth-1"
+        assert rejected_events[0]["request_id"] == "req-submit-auth-1"
+        # 鉴权拒绝后不应入队执行，因此不会产生 queued/running/completed 等状态。
+        assert not any(
+            m.get("type") == "task_event"
+            and m.get("task_id") == "submit-denied-1"
+            and m.get("event_type") in {"queued", "running", "completed", "failed", "canceled"}
+            for m in results
+        )
+
+    asyncio.run(_run())
+
+
 def test_control_stream_task_trace_id_consistent_across_events():
     async def _run():
         server = NodeAgentServer(api_keys={"n1": "k1"})

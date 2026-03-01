@@ -104,6 +104,25 @@ class ControlStreamEngine:
         assert submit is not None
         request_id = msg.get("request_id") or submit.task_id
         trace_id = msg.get("trace_id") or request_id or uuid.uuid4().hex
+        if not self.components.auth.authorize(
+            self.auth_context,
+            required_scope="task.submit",
+            allowed_roles={"admin", "operator"},
+        ):
+            self.out_queue.put_nowait(
+                {
+                    "type": "task_event",
+                    "protocol_version": DEFAULT_PROTOCOL_VERSION,
+                    "event_type": "rejected",
+                    "task_id": submit.task_id,
+                    "data": {"reason": "权限不足，拒绝提交任务"},
+                    "error_code": "AUTH_FAILED",
+                    "trace_id": trace_id,
+                    "request_id": request_id,
+                }
+            )
+            return
+
         self.task_context[submit.task_id] = {
             "request_id": request_id,
             "trace_id": trace_id,
