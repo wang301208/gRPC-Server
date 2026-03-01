@@ -43,12 +43,17 @@ class SubprocessExecutor:
 
     async def run_task(self, request: TaskRequest, on_event: Callable[[TaskEvent], None]) -> TaskStatus:
         """执行任务并持续回传日志。"""
+        env = {**os.environ, **request.env}
+        if request.assigned_gpu_indices:
+            # 与调度器选择保持一致，避免任务跑到未分配 GPU。
+            env["CUDA_VISIBLE_DEVICES"] = ",".join(str(index) for index in request.assigned_gpu_indices)
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *request.command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                env={**os.environ, **request.env},
+                env=env,
                 cwd=request.workdir or None,
             )
         except FileNotFoundError as exc:
@@ -66,7 +71,7 @@ class SubprocessExecutor:
             TaskEvent(
                 task_id=request.task_id,
                 event_type="running",
-                payload={"pid": proc.pid, "backend": "subprocess"},
+                payload={"pid": proc.pid, "backend": "subprocess", "gpu_indices": request.assigned_gpu_indices, "resource_request": request.resource_request},
             )
         )
 

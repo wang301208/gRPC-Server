@@ -36,6 +36,7 @@ class TaskRequest:
     )
     env: Dict[str, str] = field(default_factory=dict)
     workdir: str = ""
+    assigned_gpu_indices: list[int] = field(default_factory=list)
 
 
 @dataclass(slots=True)
