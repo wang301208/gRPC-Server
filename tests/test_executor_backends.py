@@ -1,7 +1,8 @@
 import asyncio
+import sys
 
 from node_agent.capability import Capability
-from node_agent.executors import DockerExecutor
+from node_agent.executors import DockerExecutor, SubprocessExecutor
 from node_agent.models import TaskEvent, TaskRequest, TaskRuntime, TaskStatus
 from node_agent.scheduler import ResourceScheduler
 from node_agent.server import NodeAgentServer
@@ -82,3 +83,68 @@ def test_docker_executor_build_command_gpu_and_env(tmp_path):
     assert f"A=B" in cmd
     assert "-w" in cmd
     assert str(workdir) in cmd
+
+
+def test_docker_executor_build_command_respects_scheduling_limits(tmp_path):
+    workdir = tmp_path / "job2"
+    workdir.mkdir()
+    request = TaskRequest(
+        task_id="d2",
+        command=["python", "-c", "print('ok')"],
+        task_type="train",
+        require_gpu=True,
+        assigned_gpu_indices=[1],
+        resource_request={"cpu_cores": 2, "memory_mb": 512, "gpu_vram_mb": 2048},
+        workdir=str(workdir),
+    )
+
+    executor = DockerExecutor(cpu_image="cpu:latest", gpu_image="gpu:latest")
+    cmd = executor._build_command(request)
+
+    # 校验 Docker 启动参数按调度结果落地。
+    assert "--cpus" in cmd and cmd[cmd.index("--cpus") + 1] == "2"
+    assert "--memory" in cmd and cmd[cmd.index("--memory") + 1] == "512m"
+    assert "--gpus" in cmd and cmd[cmd.index("--gpus") + 1] == "device=1"
+
+
+def test_subprocess_executor_sets_cuda_visible_devices_from_scheduler():
+    async def _run():
+        executor = SubprocessExecutor()
+        events = []
+        req = TaskRequest(
+            task_id="s1",
+            command=[sys.executable, "-c", "import os; print(os.environ.get('CUDA_VISIBLE_DEVICES',''))"],
+            task_type="train",
+            assigned_gpu_indices=[2, 3],
+        )
+
+        status = await executor.run_task(req, events.append)
+        assert status == TaskStatus.COMPLETED
+
+        logs = [e.payload.get("line") for e in events if e.event_type == "log"]
+        assert "2,3" in logs
+
+    asyncio.run(_run())
+
+
+def test_subprocess_executor_does_not_override_explicit_cuda_env():
+    async def _run():
+        executor = SubprocessExecutor()
+        events = []
+        req = TaskRequest(
+            task_id="s2",
+            command=[sys.executable, "-c", "import os; print(os.environ.get('CUDA_VISIBLE_DEVICES',''))"],
+            task_type="train",
+            assigned_gpu_indices=[4],
+            env={"CUDA_VISIBLE_DEVICES": "manual"},
+        )
+
+        status = await executor.run_task(req, events.append)
+        assert status == TaskStatus.COMPLETED
+
+        logs = [e.payload.get("line") for e in events if e.event_type == "log"]
+        # 当前设计以调度绑定为准，覆盖调用方手工设置。
+        assert "4" in logs
+        assert "manual" not in logs
+
+    asyncio.run(_run())

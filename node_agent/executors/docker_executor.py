@@ -20,8 +20,17 @@ class DockerExecutor:
         image = self.gpu_image if request.require_gpu else self.cpu_image
         command = ["docker", "run", "--rm"]
 
+        cpu_cores = max(1, int(request.resource_request.get("cpu_cores", 1)))
+        memory_mb = max(1, int(request.resource_request.get("memory_mb", 256)))
+        command.extend(["--cpus", str(cpu_cores), "--memory", f"{memory_mb}m"])
+
         if request.require_gpu:
-            command.extend(["--gpus", "all"])
+            # 优先绑定调度器指定的 GPU；旧逻辑回退到 all。
+            if request.assigned_gpu_indices:
+                devices = ",".join(str(index) for index in request.assigned_gpu_indices)
+                command.extend(["--gpus", f"device={devices}"])
+            else:
+                command.extend(["--gpus", "all"])
 
         workdir = request.workdir or "/workspace"
         command.extend(["-w", workdir])
@@ -61,7 +70,13 @@ class DockerExecutor:
             TaskEvent(
                 task_id=request.task_id,
                 event_type="running",
-                payload={"pid": proc.pid, "backend": "docker", "image": self.gpu_image if request.require_gpu else self.cpu_image},
+                payload={
+                    "pid": proc.pid,
+                    "backend": "docker",
+                    "image": self.gpu_image if request.require_gpu else self.cpu_image,
+                    "gpu_indices": request.assigned_gpu_indices,
+                    "resource_request": request.resource_request,
+                },
             )
         )
 

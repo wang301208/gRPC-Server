@@ -217,6 +217,8 @@ class TaskManager:
         return None
 
     async def _run_one(self, queued: _QueuedTask, resources: ResourceRequest, decision: ScheduleDecision) -> TaskStatus:
+        # 将调度结果回填到请求对象，供执行器强制设置 GPU 绑定与资源限制。
+        queued.request.assigned_gpu_indices = list(decision.gpu_indices)
         queued.runtime.status = TaskStatus.RUNNING
         queued.on_event(
             TaskEvent(
