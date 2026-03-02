@@ -4,6 +4,41 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 DEFAULT_PROTOCOL_VERSION = "v1"
+LEGACY_DICT_BASE_MAJOR = 1
+LEGACY_DICT_CURRENT_MINOR = 2
+LEGACY_DICT_SUPPORTED_MINOR_WINDOW = 2
+
+
+def _parse_protocol_version(protocol_version: str) -> tuple[int, int]:
+    """解析协议版本号，兼容 v1 / v1.2 两种写法。"""
+    normalized = protocol_version.strip().lower()
+    if not normalized.startswith("v"):
+        raise ValueError(f"非法 protocol_version: {protocol_version}")
+
+    raw = normalized[1:]
+    parts = raw.split(".")
+    if len(parts) == 1:
+        return int(parts[0]), 0
+    if len(parts) == 2:
+        return int(parts[0]), int(parts[1])
+    raise ValueError(f"非法 protocol_version: {protocol_version}")
+
+
+def validate_legacy_protocol_version(protocol_version: str) -> None:
+    """校验旧字典协议版本是否仍在兼容窗口内。"""
+    major, minor = _parse_protocol_version(protocol_version)
+    if major != LEGACY_DICT_BASE_MAJOR:
+        raise ValueError(
+            f"旧字典协议仅兼容 v{LEGACY_DICT_BASE_MAJOR}.x，当前收到 {protocol_version}"
+        )
+
+    min_minor = LEGACY_DICT_CURRENT_MINOR - LEGACY_DICT_SUPPORTED_MINOR_WINDOW
+    if minor < min_minor or minor > LEGACY_DICT_CURRENT_MINOR:
+        raise ValueError(
+            "旧字典协议版本已超出兼容窗口，"
+            f"仅支持 v{LEGACY_DICT_BASE_MAJOR}.{min_minor} ~ "
+            f"v{LEGACY_DICT_BASE_MAJOR}.{LEGACY_DICT_CURRENT_MINOR}"
+        )
 
 
 @dataclass(slots=True)
@@ -71,6 +106,7 @@ class ControlRequestEnvelope:
 # 兼容旧字典协议输入，统一映射到 oneof 结构。
 def parse_legacy_request(message: Dict[str, Any]) -> ControlRequestEnvelope:
     protocol_version = message.get("protocol_version") or DEFAULT_PROTOCOL_VERSION
+    validate_legacy_protocol_version(protocol_version)
     # 兼容策略：仅新增字段，旧客户端缺失新增字段时使用稳定默认值。
     msg_type = message.get("type")
     if msg_type == "task_submit":
