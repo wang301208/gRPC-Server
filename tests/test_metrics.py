@@ -26,14 +26,14 @@ def test_metrics_collector_can_restart():
 def test_collect_once_when_getloadavg_raises(monkeypatch):
     # 强制走无 psutil 的回退路径，验证 os.getloadavg 异常时依然返回结构化结果。
     monkeypatch.setattr("node_agent.metrics._PSUTIL", None)
-    monkeypatch.setattr("node_agent.metrics.os.getloadavg", lambda: (_ for _ in ()).throw(OSError("boom")))
+    monkeypatch.setattr("node_agent.metrics._GETLOADAVG", lambda: (_ for _ in ()).throw(OSError("boom")))
     monkeypatch.setattr("node_agent.metrics.os.path.exists", lambda p: True)
     monkeypatch.setattr(
         "builtins.open",
         mock_open(read_data="MemTotal: 1000 kB\nMemAvailable: 200 kB\n"),
     )
     monkeypatch.setattr(
-        "node_agent.metrics.os.statvfs",
+        "node_agent.metrics._STATVFS",
         lambda _: SimpleNamespace(f_blocks=100, f_frsize=1, f_bavail=25),
     )
 
@@ -48,11 +48,11 @@ def test_collect_once_when_getloadavg_raises(monkeypatch):
 def test_collect_once_without_proc_meminfo(monkeypatch):
     # 强制走无 psutil 的回退路径，模拟 /proc/meminfo 缺失场景。
     monkeypatch.setattr("node_agent.metrics._PSUTIL", None)
-    monkeypatch.setattr("node_agent.metrics.os.getloadavg", lambda: (1.0, 0.5, 0.2))
+    monkeypatch.setattr("node_agent.metrics._GETLOADAVG", lambda: (1.0, 0.5, 0.2))
     monkeypatch.setattr("node_agent.metrics.os.cpu_count", lambda: 2)
     monkeypatch.setattr("node_agent.metrics.os.path.exists", lambda p: False)
     monkeypatch.setattr(
-        "node_agent.metrics.os.statvfs",
+        "node_agent.metrics._STATVFS",
         lambda _: SimpleNamespace(f_blocks=200, f_frsize=1, f_bavail=100),
     )
 

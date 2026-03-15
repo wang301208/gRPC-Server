@@ -34,6 +34,11 @@ class TaskCancelMessage:
 
 
 @dataclass(slots=True)
+class TaskSyncRequestMessage:
+    protocol_version: str = DEFAULT_PROTOCOL_VERSION
+
+
+@dataclass(slots=True)
 class DeployRequestMessage:
     service_name: str
     workdir: str
@@ -53,6 +58,7 @@ class CloseMessage:
 class ControlRequestEnvelope:
     task_submit: Optional[TaskSubmitMessage] = None
     task_cancel: Optional[TaskCancelMessage] = None
+    task_sync_request: Optional[TaskSyncRequestMessage] = None
     deploy_request: Optional[DeployRequestMessage] = None
     close: Optional[CloseMessage] = None
 
@@ -61,6 +67,8 @@ class ControlRequestEnvelope:
             return "task_submit"
         if self.task_cancel is not None:
             return "task_cancel"
+        if self.task_sync_request is not None:
+            return "task_sync_request"
         if self.deploy_request is not None:
             return "deploy_request"
         if self.close is not None:
@@ -102,6 +110,11 @@ def parse_legacy_request(message: Dict[str, Any]) -> ControlRequestEnvelope:
                 task_id=message["task_id"],
                 protocol_version=protocol_version,
             )
+        )
+
+    if msg_type == "task_sync":
+        return ControlRequestEnvelope(
+            task_sync_request=TaskSyncRequestMessage(protocol_version=protocol_version)
         )
 
     if msg_type == "deploy":

@@ -12,6 +12,8 @@ import os
 
 _HAS_PSUTIL = importlib.util.find_spec("psutil") is not None
 _PSUTIL = importlib.import_module("psutil") if _HAS_PSUTIL else None
+_GETLOADAVG = getattr(os, "getloadavg", None)
+_STATVFS = getattr(os, "statvfs", None)
 
 
 @dataclass(slots=True)
@@ -60,9 +62,10 @@ class MetricsCollector:
 
         # 回退到当前逻辑，并对各采集点做异常保护。
         try:
-            load1, _, _ = os.getloadavg()
-            cpu_count = os.cpu_count() or 1
-            cpu_percent = min(100.0, (load1 / cpu_count) * 100)
+            if _GETLOADAVG is not None:
+                load1, _, _ = _GETLOADAVG()
+                cpu_count = os.cpu_count() or 1
+                cpu_percent = min(100.0, (load1 / cpu_count) * 100)
         except OSError:
             cpu_percent = None
 
@@ -83,10 +86,11 @@ class MetricsCollector:
             memory_percent = None
 
         try:
-            st = os.statvfs("/")
-            total = st.f_blocks * st.f_frsize
-            free = st.f_bavail * st.f_frsize
-            disk_percent = (1 - free / total) * 100 if total else None
+            if _STATVFS is not None:
+                st = _STATVFS("/")
+                total = st.f_blocks * st.f_frsize
+                free = st.f_bavail * st.f_frsize
+                disk_percent = (1 - free / total) * 100 if total else None
         except OSError:
             disk_percent = None
 

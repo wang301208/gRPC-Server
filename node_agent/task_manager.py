@@ -320,3 +320,25 @@ class TaskManager:
 
         on_event(TaskEvent(task_id=task_id, event_type="cancel_failed", payload={"reason": "任务未在运行"}))
         return False
+
+    def snapshot_active_tasks(self) -> list[dict[str, object]]:
+        snapshots: list[dict[str, object]] = []
+        for runtime in self.tasks.values():
+            if runtime.status not in {TaskStatus.QUEUED, TaskStatus.RUNNING}:
+                continue
+            request = runtime.request
+            snapshots.append(
+                {
+                    "task_id": request.task_id,
+                    "status": runtime.status.value,
+                    "task_type": request.task_type,
+                    "require_gpu": request.require_gpu,
+                    "prefer_gpu": request.prefer_gpu,
+                    "priority": request.priority,
+                    "timeout_sec": request.timeout_sec,
+                    "resource_request": dict(request.resource_request),
+                    "assigned_gpu_indices": list(request.assigned_gpu_indices),
+                }
+            )
+        snapshots.sort(key=lambda item: str(item["task_id"]))
+        return snapshots

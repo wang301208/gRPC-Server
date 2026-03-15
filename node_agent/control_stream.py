@@ -41,6 +41,8 @@ class ControlStreamEngine:
     async def run(self, session: NodeSession, incoming: AsyncIterator[Dict[str, Any]]) -> AsyncIterator[Dict[str, Any]]:
         """运行控制流并持续输出服务端事件。"""
         consumer: asyncio.Task[None] | None = None
+        loop = asyncio.get_running_loop()
+        metrics_stopped = False
         try:
             self.auth_context = self.components.auth.authenticate_with_context(session.node_id, session.api_key)
             if self.auth_context is None:
@@ -48,7 +50,7 @@ class ControlStreamEngine:
                     "type": "auth_failed",
                     "protocol_version": DEFAULT_PROTOCOL_VERSION,
                     "error_code": "AUTH_FAILED",
-                    "error_message": "节点鉴权失败",
+                    "reason": "节点鉴权失败",
                 }
                 return
 
@@ -59,14 +61,25 @@ class ControlStreamEngine:
             }
 
             # 后台启动指标推送。
-            self.components.metrics.start(
-                lambda m: self.out_queue.put_nowait(
+            def _emit_heartbeat(metric_snapshot) -> None:
+                self.out_queue.put_nowait(
                     {
                         "type": "heartbeat",
                         "protocol_version": DEFAULT_PROTOCOL_VERSION,
-                        "metrics": {**m.to_dict(), **self.components.task_metrics.snapshot().to_dict()},
+                        "metrics": {**metric_snapshot.to_dict(), **self.components.task_metrics.snapshot().to_dict()},
                     }
                 )
+
+            def _schedule_heartbeat(metric_snapshot) -> None:
+                if loop.is_closed():
+                    return
+                try:
+                    loop.call_soon_threadsafe(_emit_heartbeat, metric_snapshot)
+                except RuntimeError:
+                    return
+
+            self.components.metrics.start(
+                _schedule_heartbeat
             )
 
             consumer = asyncio.create_task(self._consume(incoming))
@@ -75,6 +88,9 @@ class ControlStreamEngine:
                     break
                 if consumer.done() and consumer.exception() is not None:
                     break
+                if consumer.done() and not metrics_stopped:
+                    self.components.metrics.stop()
+                    metrics_stopped = True
                 try:
                     item = await asyncio.wait_for(self.out_queue.get(), timeout=0.5)
                     self.components.audit.write(
@@ -95,6 +111,8 @@ class ControlStreamEngine:
                 await self._handle_submit(envelope.task_submit, msg)
             elif request_kind == "task_cancel":
                 await self._handle_cancel(envelope.task_cancel, msg)
+            elif request_kind == "task_sync_request":
+                await self._handle_task_sync(envelope.task_sync_request, msg)
             elif request_kind == "deploy_request":
                 await self._handle_deploy(envelope.deploy_request, msg)
             elif request_kind == "close":
@@ -213,6 +231,19 @@ class ControlStreamEngine:
                 "ok": result.ok,
                 "message": result.message,
                 "error_code": error_code,
+                "trace_id": msg.get("trace_id"),
+                "request_id": msg.get("request_id"),
+            }
+        )
+
+    async def _handle_task_sync(self, task_sync, msg: Dict[str, Any]) -> None:
+        assert task_sync is not None
+        snapshots = self.components.task_manager.snapshot_active_tasks()
+        self.out_queue.put_nowait(
+            {
+                "type": "task_snapshot",
+                "protocol_version": task_sync.protocol_version or DEFAULT_PROTOCOL_VERSION,
+                "tasks": snapshots,
                 "trace_id": msg.get("trace_id"),
                 "request_id": msg.get("request_id"),
             }

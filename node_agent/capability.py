@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import os
 import re
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
+
+
+_HAS_PSUTIL = importlib.util.find_spec("psutil") is not None
+_PSUTIL = importlib.import_module("psutil") if _HAS_PSUTIL else None
 
 
 @dataclass(slots=True)
@@ -37,6 +43,8 @@ class Capability:
 
 def _read_mem_mb() -> int:
     """读取总内存。"""
+    if _PSUTIL is not None:
+        return int(_PSUTIL.virtual_memory().total / (1024**2))
     if os.path.exists("/proc/meminfo"):
         with open("/proc/meminfo", "r", encoding="utf-8") as f:
             first = f.readline()
@@ -67,7 +75,7 @@ def detect_capability() -> Capability:
                 "--query-gpu=index,name,memory.total,driver_version",
                 "--format=csv,noheader,nounits",
             ]
-            out = subprocess.check_output(cmd, text=True, timeout=3).strip().splitlines()
+            out = subprocess.check_output(cmd, text=True, timeout=3, stdin=subprocess.DEVNULL).strip().splitlines()
             if out:
                 for line in out:
                     parts = [p.strip() for p in line.split(",")]
@@ -92,11 +100,11 @@ def detect_capability() -> Capability:
                     gpu_vram_mb = gpus[0].total_vram_mb
                     gpus.sort(key=lambda gpu: gpu.index)
                     gpu_available = True
-            cuda_out = subprocess.check_output(["nvidia-smi"], text=True, timeout=3)
+            cuda_out = subprocess.check_output(["nvidia-smi"], text=True, timeout=3, stdin=subprocess.DEVNULL)
             m = re.search(r"CUDA Version:\s*([\d.]+)", cuda_out)
             if m:
                 cuda_version = m.group(1)
-        except (subprocess.SubprocessError, ValueError):
+        except (subprocess.SubprocessError, ValueError, OSError):
             gpu_available = False
 
     return Capability(

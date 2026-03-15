@@ -52,6 +52,7 @@ class DockerExecutor:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *docker_cmd,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )

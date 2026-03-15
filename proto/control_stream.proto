@@ -2,14 +2,34 @@ syntax = "proto3";
 
 package node_agent.control.v1;
 
+import "google/protobuf/struct.proto";
+
 // 协议演进策略：
 // 1) 仅允许新增字段，不修改已有字段含义和编号。
 // 2) 废弃字段通过 reserved 标记并保留至少两个小版本周期。
 // 3) 客户端与服务端通过 protocol_version 协商兼容行为。
 
+message GpuInfo {
+  int32 index = 1;
+  string name = 2;
+  int32 total_vram_mb = 3;
+}
+
+message CapabilityInfo {
+  int32 cpu_cores = 1;
+  int32 total_memory_mb = 2;
+  int32 total_disk_gb = 3;
+  bool gpu_available = 4;
+  repeated GpuInfo gpus = 5;
+  string gpu_name = 6;
+  int32 gpu_vram_mb = 7;
+  string cuda_version = 8;
+  string driver_version = 9;
+}
+
 message NodeHello {
   string protocol_version = 1;
-  map<string, string> capability = 2;
+  CapabilityInfo capability = 2;
 }
 
 message TaskResourceRequest {
@@ -29,11 +49,33 @@ message TaskSubmit {
   int32 priority = 8;
   double timeout_sec = 9;
   TaskResourceRequest resource_request = 10;
+  string workdir = 11;
 }
 
 message TaskCancel {
   string protocol_version = 1;
   string task_id = 2;
+}
+
+message TaskSyncRequest {
+  string protocol_version = 1;
+}
+
+message TaskStateSnapshot {
+  string task_id = 1;
+  string status = 2;
+  string task_type = 3;
+  bool require_gpu = 4;
+  bool prefer_gpu = 5;
+  int32 priority = 6;
+  double timeout_sec = 7;
+  TaskResourceRequest resource_request = 8;
+  repeated int32 assigned_gpu_indices = 9;
+}
+
+message TaskSnapshot {
+  string protocol_version = 1;
+  repeated TaskStateSnapshot tasks = 2;
 }
 
 message TaskEvent {
@@ -48,7 +90,8 @@ message TaskEvent {
   //   payload 约定包含 name、path，可选 size（字节）。
   string event_type = 3;
   // payload 为事件附加数据，不同 event_type 的字段约束见 event_type 注释。
-  map<string, string> payload = 4;
+  google.protobuf.Struct payload = 4;
+  string error_code = 5;
 }
 
 message DeployRequest {
@@ -65,16 +108,18 @@ message DeployEvent {
   string protocol_version = 1;
   bool ok = 2;
   string message = 3;
+  string error_code = 4;
 }
 
 message Heartbeat {
   string protocol_version = 1;
-  map<string, string> metrics = 2;
+  google.protobuf.Struct metrics = 2;
 }
 
 message AuthFailed {
   string protocol_version = 1;
   string reason = 2;
+  string error_code = 3;
 }
 
 message Close {
@@ -82,21 +127,29 @@ message Close {
 }
 
 message ControlRequest {
+  string request_id = 5;
+  string trace_id = 6;
+
   oneof payload {
     TaskSubmit task_submit = 1;
     TaskCancel task_cancel = 2;
     DeployRequest deploy_request = 3;
     Close close = 4;
+    TaskSyncRequest task_sync_request = 7;
   }
 }
 
 message ControlResponse {
+  string request_id = 6;
+  string trace_id = 7;
+
   oneof payload {
     NodeHello node_hello = 1;
     TaskEvent task_event = 2;
     DeployEvent deploy_event = 3;
     Heartbeat heartbeat = 4;
     AuthFailed auth_failed = 5;
+    TaskSnapshot task_snapshot = 8;
   }
 }
 
